@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+.venv/
+*.egg-info/
+
+# Not part of the code repo (per request: code only)
+*.pdf
+*.md
