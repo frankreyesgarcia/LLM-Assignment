@@ -37,33 +37,31 @@ the SLURM orchestration scripts.
 
 ## Setup
 
-Poetry's dependency solver stalled indefinitely on this stack (`datasets` +
-`pyarrow`, no `poetry.lock` yet) — install directly with pip instead, into
-the venv poetry already created (or any venv):
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). Install uv,
+then sync the environment (this resolves and installs everything from
+`uv.lock`, including the `pytest` dev group):
 
 ```bash
-pip install datasets huggingface-hub pyarrow regex pyyaml datasketch langid requests pytest
-# exact versions that were verified to work together:
-pip install -r requirements-lock.txt
+uv sync
 ```
 
 ## Usage
 
 ```bash
 # Fase 0: inspect all 12 sources (size, schema, license) -> configs/sources.yaml
-python scripts/inspect_sources.py
+uv run scripts/inspect_sources.py
 
 # smoke-test a single source without touching configs/sources.yaml
-python scripts/inspect_sources.py --only hi-euroweb
+uv run scripts/inspect_sources.py --only hi-euroweb
 
 # Fase 1: run the pilot pipeline (streams up to --limit docs)
-python scripts/run_pilot.py --limit 2000
+uv run scripts/run_pilot.py --limit 2000
 
 # Fase 2: run all 10 available sources -> data/processed/{pt,es,hi}.parquet
-python scripts/run_all_sources.py --limit-per-source 500
+uv run scripts/run_all_sources.py --limit-per-source 500
 
 # tests
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ## Known findings from the pilot (corpus-ptbr-v2, 2026-07-08)
