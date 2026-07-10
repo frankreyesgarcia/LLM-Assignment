@@ -13,6 +13,81 @@ from collections import defaultdict
 from src.ingest.base import VALID_LANGUAGES
 
 
+def parse_lang_ratios(spec: str) -> dict[str, float]:
+    """Parse a `"hi:0.5,pt:0.25,es:0.25"`-style CLI value into a dict.
+
+    Values don't need to sum to 1 -- `oversample_by_ratio` normalizes
+    them -- so `"hi:2,pt:1,es:1"` (a 2:1:1 ratio) works just as well.
+    """
+    ratios: dict[str, float] = {}
+    for part in spec.split(","):
+        lang, _, weight = part.partition(":")
+        lang = lang.strip()
+        if not lang or not weight:
+            raise ValueError(f"Malformed lang ratio entry {part!r}, expected 'lang:weight'")
+        if lang not in VALID_LANGUAGES:
+            raise ValueError(f"Unknown language {lang!r} in lang ratio spec, expected one of {VALID_LANGUAGES}")
+        ratios[lang] = float(weight)
+    return ratios
+
+
+def oversample_by_ratio(
+    docs_by_lang: dict[str, list[str]],
+    lang_ratios: dict[str, float],
+    target_total_bytes: float | None = None,
+) -> dict[str, list[str]]:
+    """Build a per-language training doc list at an exact byte ratio by
+    *repeating* a language's documents when it doesn't have enough
+    unique data to reach its target share, instead of truncating the
+    other languages down to match the scarcest one.
+
+    This is the standard multilingual-tokenizer trick (mBERT/XLM-R-style
+    upsampling of low-resource languages): duplicating documents just
+    linearly scales that language's word-frequency mass for BPE's
+    merge-frequency counting. That's safe for a *tokenizer* specifically
+    -- BPE training is pure frequency counting with no gradient descent,
+    so repeated text carries no memorization/overfitting risk the way it
+    would for a model.
+
+    If `target_total_bytes` isn't given, it defaults to the largest
+    total for which every language can be built from its *own* full
+    natural data at least once (`max` over languages of
+    `natural_bytes[lang] / ratio[lang]`) -- i.e. the language that's
+    naturally closest to its target share needs zero repeats or
+    truncation, and every other language is oversampled (never
+    truncated) up to match it.
+    """
+    total = sum(lang_ratios.values())
+    if total <= 0:
+        raise ValueError(f"lang_ratios must have a positive sum, got {lang_ratios!r}")
+    ratios = {lang: weight / total for lang, weight in lang_ratios.items() if weight > 0}
+
+    natural_bytes: dict[str, int] = {}
+    for lang in ratios:
+        available = docs_by_lang.get(lang) or []
+        if not available:
+            raise ValueError(f"No documents available for language {lang!r}, cannot honor lang_ratios")
+        natural_bytes[lang] = sum(len(t.encode("utf-8")) for t in available)
+
+    if target_total_bytes is None:
+        target_total_bytes = max(natural_bytes[lang] / ratios[lang] for lang in ratios)
+
+    oversampled: dict[str, list[str]] = {}
+    for lang, ratio in ratios.items():
+        available = docs_by_lang[lang]
+        target_bytes = target_total_bytes * ratio
+        collected: list[str] = []
+        collected_bytes = 0
+        i = 0
+        while collected_bytes < target_bytes:
+            doc = available[i % len(available)]
+            collected.append(doc)
+            collected_bytes += len(doc.encode("utf-8"))
+            i += 1
+        oversampled[lang] = collected
+    return oversampled
+
+
 def stratified_sample(
     repo_id: str,
     config: str,

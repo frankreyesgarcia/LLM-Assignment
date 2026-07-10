@@ -38,7 +38,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.tokenizer.data import stratified_sample
+from src.tokenizer.data import oversample_by_ratio, parse_lang_ratios, stratified_sample
 from src.tokenizer.eval import per_language_report
 from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import save_pretrained, train_tokenizer
@@ -62,6 +62,7 @@ def run_comparison(
     vocab_size: int,
     limit_docs: int | None,
     tokenizer_dir: Path | None,
+    lang_ratios: dict[str, float] | None,
     out_dir: Path,
 ) -> list[dict]:
     from transformers import AutoTokenizer
@@ -94,7 +95,20 @@ def run_comparison(
         tokenizers_to_eval[name] = (repo, AutoTokenizer.from_pretrained(repo))
 
     print(f"Training a fresh vocab_size={vocab_size:,} tokenizer on the train bucket for a fair 'ours' row...")
-    train_texts = [text for texts in train_docs.values() for text in texts]
+    if lang_ratios is not None:
+        oversampled_by_lang = oversample_by_ratio(train_docs, lang_ratios)
+        print(f"  oversampling train bucket to lang_ratios={lang_ratios} (heldout stays natural):")
+        for lang, texts in oversampled_by_lang.items():
+            natural = len(train_docs.get(lang, []))
+            natural_bytes = sum(len(t.encode("utf-8")) for t in train_docs.get(lang, []))
+            used_bytes = sum(len(t.encode("utf-8")) for t in texts)
+            print(
+                f"    {lang}: {natural:,} unique docs/{natural_bytes:,} bytes natural -> "
+                f"{len(texts):,} docs/{used_bytes:,} bytes after oversampling"
+            )
+        train_texts = [text for texts in oversampled_by_lang.values() for text in texts]
+    else:
+        train_texts = [text for texts in train_docs.values() for text in texts]
     ours = save_pretrained(train_tokenizer(train_texts, vocab_size=vocab_size), out_dir / "_comparison_only_tokenizer")
     tokenizers_to_eval["ours"] = (f"trained here, vocab_size={vocab_size}", ours)
 
@@ -169,9 +183,19 @@ if __name__ == "__main__":
         default=None,
         help="Optional: also report the shipped artifact (from train_tokenizer.py), clearly labeled as in-sample/not comparable",
     )
+    parser.add_argument(
+        "--lang-ratios",
+        type=str,
+        default=None,
+        help="Optional per-language training-mix ratio for the fresh 'ours' tokenizer, e.g. "
+        "'hi:0.5,pt:0.25,es:0.25' (normalized to sum to 1). Applied to the train bucket only (heldout stays "
+        "natural/unrepeated) by *oversampling* (repeating docs of) whichever language(s) don't have enough "
+        "unique data to hit their share -- see src/tokenizer/data.py::oversample_by_ratio.",
+    )
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep")
     args = parser.parse_args()
 
+    lang_ratios = parse_lang_ratios(args.lang_ratios) if args.lang_ratios else None
     with tee_to_log(args.out_dir, "compare_baselines"):
         run_comparison(
             repo_id=args.repo_id,
@@ -182,6 +206,7 @@ if __name__ == "__main__":
             vocab_size=args.vocab_size,
             limit_docs=args.limit_docs,
             tokenizer_dir=args.tokenizer_dir,
+            lang_ratios=lang_ratios,
             out_dir=args.out_dir,
         )
 
