@@ -44,8 +44,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.ingest.base import VALID_LANGUAGES
-from src.tokenizer.data import stratified_sample
+from src.tokenizer.data import oversample_by_ratio, parse_lang_ratios, stratified_sample
 from src.tokenizer.eval import per_language_report
+from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import train_tokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -69,6 +70,7 @@ def run_sweep(
     hidden_dim: int,
     target_total_params: int,
     limit_docs: int | None,
+    lang_ratios: dict[str, float] | None,
     out_dir: Path,
 ) -> list[dict]:
     print(f"Streaming samples from {repo_id}/{config} (train<={train_mb}MB, heldout<={heldout_mb}MB)...")
@@ -81,7 +83,21 @@ def run_sweep(
             f"  {lang}: train={len(train_docs.get(lang, [])):>6,} docs, "
             f"heldout={len(heldout_docs.get(lang, [])):>6,} docs"
         )
-    train_texts = [text for texts in train_docs.values() for text in texts]
+
+    if lang_ratios is not None:
+        oversampled_by_lang = oversample_by_ratio(train_docs, lang_ratios)
+        print(f"  oversampling train bucket to lang_ratios={lang_ratios} (heldout stays natural):")
+        for lang, texts in oversampled_by_lang.items():
+            natural = len(train_docs.get(lang, []))
+            natural_bytes = sum(len(t.encode("utf-8")) for t in train_docs.get(lang, []))
+            used_bytes = sum(len(t.encode("utf-8")) for t in texts)
+            print(
+                f"    {lang}: {natural:,} unique docs/{natural_bytes:,} bytes natural -> "
+                f"{len(texts):,} docs/{used_bytes:,} bytes after oversampling"
+            )
+        train_texts = [text for texts in oversampled_by_lang.values() for text in texts]
+    else:
+        train_texts = [text for texts in train_docs.values() for text in texts]
 
     rows: list[dict] = []
     for vocab_size in vocab_sizes:
@@ -175,22 +191,34 @@ if __name__ == "__main__":
         help="Paired with --hidden-dim (default: GPT-2-Small's 124M params). Same caveat: illustrative anchor, not a decision.",
     )
     parser.add_argument("--limit-docs", type=int, default=None, help="Debug cap on docs streamed from the source")
+    parser.add_argument(
+        "--lang-ratios",
+        type=str,
+        default=None,
+        help="Optional per-language training-mix ratio, e.g. 'hi:0.5,pt:0.25,es:0.25' (normalized to sum to 1). "
+        "Applied to the train bucket only (heldout stays natural/unrepeated) by *oversampling* (repeating docs "
+        "of) whichever language(s) don't have enough unique data to hit their share -- see "
+        "src/tokenizer/data.py::oversample_by_ratio.",
+    )
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep")
     args = parser.parse_args()
 
     vocab_sizes = [int(v) for v in args.vocab_sizes.split(",")]
-    run_sweep(
-        repo_id=args.repo_id,
-        config=args.config,
-        split=args.split,
-        vocab_sizes=vocab_sizes,
-        train_mb=args.train_sample_mb,
-        heldout_mb=args.heldout_sample_mb,
-        hidden_dim=args.hidden_dim,
-        target_total_params=args.target_total_params,
-        limit_docs=args.limit_docs,
-        out_dir=args.out_dir,
-    )
+    lang_ratios = parse_lang_ratios(args.lang_ratios) if args.lang_ratios else None
+    with tee_to_log(args.out_dir, "sweep_vocab_size"):
+        run_sweep(
+            repo_id=args.repo_id,
+            config=args.config,
+            split=args.split,
+            vocab_sizes=vocab_sizes,
+            train_mb=args.train_sample_mb,
+            heldout_mb=args.heldout_sample_mb,
+            hidden_dim=args.hidden_dim,
+            target_total_params=args.target_total_params,
+            limit_docs=args.limit_docs,
+            lang_ratios=lang_ratios,
+            out_dir=args.out_dir,
+        )
 
     # See scripts/run_pilot.py for why: `datasets` streaming leaves
     # background threads that crash normal interpreter teardown.

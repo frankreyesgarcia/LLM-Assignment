@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.tokenizer.data import stratified_sample
 from src.tokenizer.eval import per_language_report
+from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import save_pretrained, train_tokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -71,15 +72,16 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer")
     args = parser.parse_args()
 
-    run(
-        repo_id=args.repo_id,
-        config=args.config,
-        split=args.split,
-        vocab_size=args.vocab_size,
-        limit_docs=args.limit_docs,
-        eval_sample_mb=args.eval_sample_mb,
-        out_dir=args.out_dir,
-    )
+    with tee_to_log(args.out_dir, "train_tokenizer"):
+        run(
+            repo_id=args.repo_id,
+            config=args.config,
+            split=args.split,
+            vocab_size=args.vocab_size,
+            limit_docs=args.limit_docs,
+            eval_sample_mb=args.eval_sample_mb,
+            out_dir=args.out_dir,
+        )
 
     # See scripts/run_pilot.py for why: `datasets` streaming leaves
     # background threads that crash normal interpreter teardown.

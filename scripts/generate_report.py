@@ -52,6 +52,7 @@ def _read_csv(path: Path, float_cols: list[str], int_cols: list[str]) -> list[di
 def generate_report(
     sweep_csv: Path,
     baseline_csv: Path | None,
+    sample_stats_csv: Path | None,
     chosen_vocab_size: int | None,
     out_dir: Path,
 ) -> Path:
@@ -73,13 +74,26 @@ def generate_report(
         )
         plot_baseline_comparison(baseline_rows, out_dir / "baseline_comparison.png")
 
+    sample_stats_rows = None
+    if sample_stats_csv is not None and sample_stats_csv.exists():
+        sample_stats_rows = _read_csv(
+            sample_stats_csv,
+            float_cols=[],
+            int_cols=["train_docs", "train_chars", "heldout_docs", "heldout_chars"],
+        )
+
     report_path = out_dir / "report.md"
-    report_path.write_text(_render_markdown(sweep_rows, baseline_rows, vocab_size))
+    report_path.write_text(_render_markdown(sweep_rows, baseline_rows, sample_stats_rows, vocab_size))
     print(f"Wrote {report_path}")
     return report_path
 
 
-def _render_markdown(sweep_rows: list[dict], baseline_rows: list[dict] | None, chosen_vocab_size: int) -> str:
+def _render_markdown(
+    sweep_rows: list[dict],
+    baseline_rows: list[dict] | None,
+    sample_stats_rows: list[dict] | None,
+    chosen_vocab_size: int,
+) -> str:
     vocab_sizes = sorted({r["vocab_size"] for r in sweep_rows})
     overall = {r["vocab_size"]: r for r in sweep_rows if r["lang"] == "overall"}
 
@@ -156,6 +170,25 @@ def _render_markdown(sweep_rows: list[dict], baseline_rows: list[dict] | None, c
             f"{r['compression_ratio']:.3f} | {r['embedding_param_share']:.1%} |"
         )
 
+    if sample_stats_rows is not None:
+        lines += [
+            "",
+            "## Sample sizes",
+            "",
+            "Per-language doc/char counts of the disjoint train/held-out "
+            "buckets used for the baseline comparison below (produced by "
+            "`scripts/compare_baselines.py`'s `stratified_sample` byte-cap "
+            "split, not a fixed doc-count target).",
+            "",
+            "| lang | train docs | train chars | heldout docs | heldout chars |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for r in sorted(sample_stats_rows, key=lambda r: r["lang"]):
+            lines.append(
+                f"| {r['lang']} | {r['train_docs']:,} | {r['train_chars']:,} | "
+                f"{r['heldout_docs']:,} | {r['heldout_chars']:,} |"
+            )
+
     if baseline_rows is not None:
         lines += [
             "",
@@ -188,6 +221,9 @@ if __name__ == "__main__":
         "--baseline-csv", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep" / "baseline_comparison.csv"
     )
     parser.add_argument(
+        "--sample-stats-csv", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep" / "sample_stats.csv"
+    )
+    parser.add_argument(
         "--chosen-vocab-size", type=int, default=None, help="Override the Kneedle-picked size (must match a swept candidate)"
     )
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep")
@@ -196,6 +232,7 @@ if __name__ == "__main__":
     generate_report(
         sweep_csv=args.sweep_csv,
         baseline_csv=args.baseline_csv,
+        sample_stats_csv=args.sample_stats_csv,
         chosen_vocab_size=args.chosen_vocab_size,
         out_dir=args.out_dir,
     )
