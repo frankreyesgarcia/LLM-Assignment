@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.tokenizer.data import stratified_sample
 from src.tokenizer.eval import per_language_report
+from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import save_pretrained, train_tokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -68,8 +69,24 @@ def run_comparison(
     print(f"Streaming train+held-out samples from {repo_id}/{config} (train<={train_mb}MB, heldout<={heldout_mb}MB)...")
     buckets = stratified_sample(repo_id, config, split, [("train", train_mb), ("heldout", heldout_mb)], limit_docs)
     train_docs, docs = buckets["train"], buckets["heldout"]
+    sample_stats: list[dict] = []
     for lang, texts in docs.items():
-        print(f"  {lang}: train={len(train_docs.get(lang, [])):,} docs, heldout={len(texts):,} docs")
+        train_texts = train_docs.get(lang, [])
+        train_chars = sum(len(t) for t in train_texts)
+        heldout_chars = sum(len(t) for t in texts)
+        print(
+            f"  {lang}: train={len(train_texts):,} docs/{train_chars:,} chars, "
+            f"heldout={len(texts):,} docs/{heldout_chars:,} chars"
+        )
+        sample_stats.append(
+            {
+                "lang": lang,
+                "train_docs": len(train_texts),
+                "train_chars": train_chars,
+                "heldout_docs": len(texts),
+                "heldout_chars": heldout_chars,
+            }
+        )
 
     tokenizers_to_eval: dict[str, tuple[str, Any]] = {}
     for name, repo in BASELINES.items():
@@ -113,6 +130,15 @@ def run_comparison(
         writer.writerows(rows)
     print(f"Wrote {csv_path}")
 
+    stats_path = out_dir / "sample_stats.csv"
+    with open(stats_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["lang", "train_docs", "train_chars", "heldout_docs", "heldout_chars"]
+        )
+        writer.writeheader()
+        writer.writerows(sample_stats)
+    print(f"Wrote {stats_path}")
+
     _print_markdown_table(rows)
     return rows
 
@@ -146,17 +172,18 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep")
     args = parser.parse_args()
 
-    run_comparison(
-        repo_id=args.repo_id,
-        config=args.config,
-        split=args.split,
-        train_mb=args.train_sample_mb,
-        heldout_mb=args.heldout_sample_mb,
-        vocab_size=args.vocab_size,
-        limit_docs=args.limit_docs,
-        tokenizer_dir=args.tokenizer_dir,
-        out_dir=args.out_dir,
-    )
+    with tee_to_log(args.out_dir, "compare_baselines"):
+        run_comparison(
+            repo_id=args.repo_id,
+            config=args.config,
+            split=args.split,
+            train_mb=args.train_sample_mb,
+            heldout_mb=args.heldout_sample_mb,
+            vocab_size=args.vocab_size,
+            limit_docs=args.limit_docs,
+            tokenizer_dir=args.tokenizer_dir,
+            out_dir=args.out_dir,
+        )
 
     # See scripts/run_pilot.py for why: `datasets` streaming leaves
     # background threads that crash normal interpreter teardown.

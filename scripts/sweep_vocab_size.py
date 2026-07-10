@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.ingest.base import VALID_LANGUAGES
 from src.tokenizer.data import stratified_sample
 from src.tokenizer.eval import per_language_report
+from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import train_tokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -179,18 +180,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     vocab_sizes = [int(v) for v in args.vocab_sizes.split(",")]
-    run_sweep(
-        repo_id=args.repo_id,
-        config=args.config,
-        split=args.split,
-        vocab_sizes=vocab_sizes,
-        train_mb=args.train_sample_mb,
-        heldout_mb=args.heldout_sample_mb,
-        hidden_dim=args.hidden_dim,
-        target_total_params=args.target_total_params,
-        limit_docs=args.limit_docs,
-        out_dir=args.out_dir,
-    )
+    with tee_to_log(args.out_dir, "sweep_vocab_size"):
+        run_sweep(
+            repo_id=args.repo_id,
+            config=args.config,
+            split=args.split,
+            vocab_sizes=vocab_sizes,
+            train_mb=args.train_sample_mb,
+            heldout_mb=args.heldout_sample_mb,
+            hidden_dim=args.hidden_dim,
+            target_total_params=args.target_total_params,
+            limit_docs=args.limit_docs,
+            out_dir=args.out_dir,
+        )
 
     # See scripts/run_pilot.py for why: `datasets` streaming leaves
     # background threads that crash normal interpreter teardown.
