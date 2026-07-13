@@ -29,6 +29,19 @@ def fix_mojibake(text: str) -> str:
     return text
 
 
+def unescape_literal_whitespace(text: str) -> str:
+    """Turn literal backslash-escape sequences (`\\n`, `\\r\\n`, `\\t`) into
+    real whitespace chars.
+
+    Some sources (observed in EuroWeb) went through a JSON round-trip
+    somewhere upstream that left the escape sequences as literal two-char
+    text instead of decoding them, so `text.split("\\n")` elsewhere in this
+    pipeline (here, and in quality.py's per-line rules) silently treats the
+    whole document as a single line for those rows.
+    """
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
 def normalize_unicode(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
@@ -61,6 +74,7 @@ def clean_text(text: str) -> str:
     text = normalize_unicode(text)
     text = strip_control_chars(text)
     text = fix_mojibake(text)
+    text = unescape_literal_whitespace(text)
     text = collapse_whitespace(text)
     text = dedupe_consecutive_lines(text)
     return text

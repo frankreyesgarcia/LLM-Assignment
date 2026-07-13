@@ -1,4 +1,10 @@
-from src.filters.clean import clean_text, collapse_whitespace, fix_mojibake, strip_control_chars
+from src.filters.clean import (
+    clean_text,
+    collapse_whitespace,
+    fix_mojibake,
+    strip_control_chars,
+    unescape_literal_whitespace,
+)
 from src.filters.language import hard_filter
 from src.filters.quality import QualityConfig, check_quality
 from src.ingest.base import Document
@@ -36,6 +42,32 @@ def test_strip_control_chars():
 def test_clean_text_dedupes_consecutive_lines():
     text = "hello\nhello\nworld"
     assert clean_text(text) == "hello\nworld"
+
+
+def test_unescape_literal_whitespace_splits_paragraphs():
+    # Found this as one of the text in EuroWeb-2512 Hindi ingestion, which was incorrectly treated as a single line
+    # Reproduce:
+    # >>> ds = load_dataset('utter-project/EuroWeb-2512', 'hi', split='high', streaming=True)
+    # >>> for row in ds:
+    # ...     t = row['text']
+    # ...     if t.count('\n') == 0 and re.search(r'\\n|\\r\\n', t):
+    # ...         print(t[:300])
+    # ...         break
+    text = (
+        "एनसीईआरटी नोट्स: बादलों के प्रकार [यूपीएससी के लिए भूगोल नोट्स]\\n"
+        "बादल पृथ्वी के मौसम और जलवायु का एक महत्वपूर्ण हिस्सा हैं।\\n"
+        "आकाश में जल से बादल बनते हैं।"
+    )
+    assert text.count("\n") == 0  # confirms it's one "line" before unescaping
+
+    result = unescape_literal_whitespace(text)
+
+    assert "\\n" not in result
+    assert result.split("\n") == [
+        "एनसीईआरटी नोट्स: बादलों के प्रकार [यूपीएससी के लिए भूगोल नोट्स]",
+        "बादल पृथ्वी के मौसम और जलवायु का एक महत्वपूर्ण हिस्सा हैं।",
+        "आकाश में जल से बादल बनते हैं।",
+    ]
 
 
 # --- quality.py ---
