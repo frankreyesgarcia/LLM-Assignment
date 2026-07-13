@@ -1,5 +1,5 @@
 from src.dedup.exact import ExactDeduper, normalize_for_hash
-from src.dedup.minhash import NearDeduper
+from src.dedup.minhash import NearDeduper, SqliteNearDeduper
 
 
 # --- exact.py ---
@@ -57,3 +57,86 @@ def test_near_deduper_keeps_distinct_docs():
     unrelated = "completely different content about a totally unrelated topic in another domain"
     assert deduper.is_duplicate(unrelated) is False
     assert len(deduper) == 2
+
+
+# --- SqliteNearDeduper: same behavior as NearDeduper, disk-backed instead of in-memory ---
+
+
+def test_sqlite_near_deduper_flags_near_identical_text(tmp_path):
+    deduper = SqliteNearDeduper(tmp_path / "near.sqlite3", jaccard_threshold=0.8)
+    assert deduper.is_duplicate(_BASE_TEXT) is False
+    near_copy = _BASE_TEXT + " mas."
+    assert deduper.is_duplicate(near_copy) is True
+    deduper.close()
+
+
+def test_sqlite_near_deduper_keeps_distinct_docs(tmp_path):
+    deduper = SqliteNearDeduper(tmp_path / "near.sqlite3", jaccard_threshold=0.8)
+    assert deduper.is_duplicate(_BASE_TEXT) is False
+    unrelated = "completely different content about a totally unrelated topic in another domain"
+    assert deduper.is_duplicate(unrelated) is False
+    assert len(deduper) == 2
+    deduper.close()
+
+
+def test_sqlite_near_deduper_uncommitted_writes_roll_back_on_crash(tmp_path):
+    db_path = tmp_path / "near.sqlite3"
+    deduper = SqliteNearDeduper(db_path, jaccard_threshold=0.8)
+    assert deduper.is_duplicate(_BASE_TEXT) is False
+    # No commit() -- close the raw connection directly (bypassing our
+    # close(), which commits) to simulate an abrupt crash. sqlite3 discards
+    # an uncommitted transaction on close, same as it would on process
+    # death; relying on `del`+GC here would be a timing-dependent test, not
+    # a real crash simulation.
+    deduper.conn.close()
+
+    reopened = SqliteNearDeduper(db_path, jaccard_threshold=0.8)
+    assert len(reopened) == 0
+    assert reopened.is_duplicate(_BASE_TEXT) is False
+    reopened.commit()
+    reopened.close()
+
+
+def test_sqlite_near_deduper_committed_writes_persist_across_reopen(tmp_path):
+    db_path = tmp_path / "near.sqlite3"
+    deduper = SqliteNearDeduper(db_path, jaccard_threshold=0.8)
+    assert deduper.is_duplicate(_BASE_TEXT) is False
+    deduper.commit()
+    del deduper
+
+    reopened = SqliteNearDeduper(db_path, jaccard_threshold=0.8)
+    assert len(reopened) == 1
+    near_copy = _BASE_TEXT + " mas."
+    assert reopened.is_duplicate(near_copy) is True
+    reopened.close()
+
+
+def test_sqlite_near_deduper_matches_optimal_param_banding(tmp_path):
+    deduper = SqliteNearDeduper(tmp_path / "near.sqlite3", num_permutations=128, jaccard_threshold=0.85)
+    assert (deduper.b, deduper.r) == (8, 16)
+    deduper.close()
+
+
+def test_sqlite_near_deduper_delete_by_source_purges_only_that_source(tmp_path):
+    deduper = SqliteNearDeduper(tmp_path / "near.sqlite3", jaccard_threshold=0.8)
+    unrelated = "completely different content about a totally unrelated topic in another domain"
+    assert deduper.is_duplicate(_BASE_TEXT, source_row="row-a") is False
+    assert deduper.is_duplicate(unrelated, source_row="row-b") is False
+    deduper.commit()
+    assert len(deduper) == 2
+
+    deduper.delete_by_source("row-a")
+    assert len(deduper) == 1
+    # row-a's doc is gone from the index -- inserting it again is not a duplicate.
+    assert deduper.is_duplicate(_BASE_TEXT, source_row="row-a") is False
+    # row-b's doc is untouched -- its near-copy is still flagged as a duplicate.
+    near_copy_of_unrelated = unrelated + " extra"
+    assert deduper.is_duplicate(near_copy_of_unrelated, source_row="row-b") is True
+    deduper.close()
+
+
+def test_sqlite_near_deduper_delete_by_source_on_empty_source_is_noop(tmp_path):
+    deduper = SqliteNearDeduper(tmp_path / "near.sqlite3", jaccard_threshold=0.8)
+    deduper.delete_by_source("never-seen-row")  # must not raise
+    assert len(deduper) == 0
+    deduper.close()

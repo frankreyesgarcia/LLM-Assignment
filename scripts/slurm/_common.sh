@@ -1,0 +1,31 @@
+# Shared preamble for the scripts in this directory. Source it, don't run it
+# directly: `source "$(dirname "$0")/_common.sh"`.
+#
+# Fill in the two placeholders below before submitting anything:
+#   PROJECT_ACCOUNT  -- your Naiss/SUPR compute allocation (sbatch -A)
+#   PROJECT_STORAGE  -- persistent project storage (/proj/<your-project>/...),
+#                       NOT node-local $TMPDIR. run_all_sources.py's
+#                       resumability (checkpoint.json + Parquet parts +
+#                       near_dedup_*.sqlite3) depends on --out-dir surviving
+#                       across separate job submissions (e.g. after a
+#                       requeue on timeout) -- $TMPDIR is wiped per-job on
+#                       most Naiss clusters and would silently break that.
+export PROJECT_ACCOUNT="${PROJECT_ACCOUNT:?set PROJECT_ACCOUNT to your Naiss allocation, e.g. naiss2026-x-y}"
+export PROJECT_STORAGE="${PROJECT_STORAGE:?set PROJECT_STORAGE to persistent project storage, e.g. /proj/your-project/llm-und}"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+# Adjust to whatever this cluster provides -- Naiss clusters differ (Alvis,
+# Dardel, Tetralith, ...). uv itself is a single static binary (see
+# https://docs.astral.sh/uv/getting-started/installation/); a `module load`
+# is usually not needed for uv, only if the cluster requires an explicit
+# Python module before uv can find an interpreter to manage.
+command -v uv >/dev/null || { echo "uv not found on PATH -- install it first (curl -LsSf https://astral.sh/uv/install.sh | sh)"; exit 1; }
+
+uv sync --frozen
+
+RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%dT%H%M%S)}"
+LOG_DIR="$REPO_ROOT/runs/$RUN_ID"
+mkdir -p "$LOG_DIR"
+echo "Logs/counters for this run: $LOG_DIR"

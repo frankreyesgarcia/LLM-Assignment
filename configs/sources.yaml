@@ -673,8 +673,17 @@ sources:
     it (needs load_dataset(..., trust_remote_code=True)).
   license: cc-by-4.0
   size:
-    status: script_based
-    error: Cannot get the config names for the dataset.
+    status: estimated_via_hub_listing
+    note: datasets-server can't resolve config names for this repo (it's raw
+      gzip-compressed TEI XML, not a datasets-script-loadable format -- see
+      src/ingest/adapters/carolina.py for the bespoke streaming parser).
+      Estimate below sums *compressed* .xml.gz file sizes from the Hub repo
+      file listing across all 7 taxonomy folders; row/doc count isn't
+      estimated since TEI-XML-to-rows doesn't extrapolate the way parquet
+      row counts do (one XML file can contain a very variable number of
+      <TEI> documents).
+    num_bytes_gzip: 3110000000
+    num_files: 554
   schema:
     status: no_split_found
 - row: pt-portuguese-pd
@@ -686,8 +695,15 @@ sources:
   hf_split: null
   license: null
   size:
-    status: size_unavailable
-    note: size API returned 0 rows/bytes with no error; check schema/samples instead
+    status: estimated_via_hub_listing
+    note: datasets-server /size returned 0 rows/bytes with no error for this
+      repo. Estimate below sums file sizes from the Hub repo file listing
+      (7 parquet files) and extrapolates row count from one sampled file's
+      rows-per-GB ratio. Low rows/GB is expected -- this source is digitized
+      full books/documents (large per-row text), not short web pages.
+    num_bytes_parquet: 3320000000
+    num_rows: 9409
+    num_files: 7
   schema:
     status: ok
     split_used: train
@@ -936,9 +952,16 @@ sources:
   hf_split: train
   license: odc-by
   size:
-    status: timeout_retry_needed
-    error: 'Could not read the parquet files: (ReadTimeoutError("HTTPSConnectionPool(host=''huggingface.co'',
-      port=443): Read timed out. (read timeout=10)"), ''(Request ID: 722494a9-005e-450e-885a-b4343ffbf0da)'')'
+    status: estimated_via_hub_listing
+    note: datasets-server /size times out server-side on this config (too many
+      parquet files); estimate below sums file sizes from the Hub repo file
+      listing (train/ prefix only, api.repo_info(files_metadata=True)) and
+      extrapolates row count from one sampled file's rows-per-GB ratio.
+      Re-run scripts/inspect_sources.py --only es-fineweb2 --write periodically
+      in case the server-side size index catches up.
+    num_bytes_parquet: 637611323581
+    num_rows: 437987333
+    num_files: 146
   schema:
     status: ok
     split_used: train
@@ -1414,9 +1437,17 @@ sources:
   hf_split: train
   license: cc0-1.0
   size:
-    status: timeout_retry_needed
-    error: The server is busier than usual and the response is not ready yet. Please
-      retry later.
+    status: estimated_via_hub_listing
+    note: datasets-server /size returns "server is busier than usual" for this
+      config (4,687 parquet files); estimate below sums file sizes from the
+      Hub repo file listing (api.repo_info(files_metadata=True)) and
+      extrapolates row count from one sampled file's rows-per-GB ratio.
+      Re-run scripts/inspect_sources.py --only es-hplt2 --write periodically
+      in case the server-side size index catches up. NOTE largest source in
+      the corpus by far (~1.26TB) -- budget disk/time accordingly.
+    num_bytes_parquet: 1258084553586
+    num_rows: 547031519
+    num_files: 4687
   schema:
     status: ok
     split_used: train
@@ -2412,8 +2443,16 @@ sources:
   hf_split: train
   license: cc0-1.0
   size:
-    status: timeout_retry_needed
-    error: '504 Server Error: Gateway Time-out for url: https://huggingface.co/api/datasets/HPLT/HPLT2.0_cleaned/revision/refs%2Fconvert%2Fparquet'
+    status: estimated_via_hub_listing
+    note: datasets-server /size 504s on the revision-resolution step for this
+      repo; estimate below sums file sizes from the Hub repo file listing
+      (api.repo_info(files_metadata=True)) and extrapolates row count from
+      one sampled file's rows-per-GB ratio. Re-run
+      scripts/inspect_sources.py --only hi-hplt2 --write periodically in
+      case the server-side size index catches up.
+    num_bytes_parquet: 42912196552
+    num_rows: 25576742
+    num_files: 237
   schema:
     status: ok
     split_used: train

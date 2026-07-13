@@ -9,7 +9,7 @@ dataset (see "Task 2 — Tokenizer" below).
 
 ## Status
 
-Implemented so far (Fase 0 + Fase 1 + most of Fase 2 of the plan):
+Implemented so far (Fase 0 through most of Fase 5 of the plan):
 
 - `src/ingest/` — unified schema (`Document`), `SourceAdapter` interface,
   `GenericTextAdapter` (covers 7 of the 12 sources as-is), `HPLTAdapter`
@@ -22,22 +22,44 @@ Implemented so far (Fase 0 + Fase 1 + most of Fase 2 of the plan):
   a hard guard that fails fast if EuroWeb Hindi is ever requested with a
   split other than `high`.
 - `src/filters/` — language hard/soft filter, text cleaning, quality heuristics.
-- `src/dedup/` — exact dedup (SHA256) and near dedup (MinHash + LSH).
+- `src/dedup/` — exact dedup (SHA256, in-memory) and near dedup (MinHash +
+  LSH), two near-dedup backends: `NearDeduper` (in-memory, for
+  `run_pilot.py`/tests) and `SqliteNearDeduper` (LSH buckets + signatures
+  in a SQLite file instead of a Python dict, so the index doesn't have to
+  fit in RAM -- what `run_all_sources.py` uses).
+- `src/aggregate.py` — `shuffle_into_shards`: two-pass streaming shuffle
+  (stream input -> randomly partition into K shards sized off on-disk
+  bytes -> locally shuffle each bounded-size shard) so Etapa 6 never loads
+  a whole language into memory and writes ~500MB-1GB output shards instead
+  of one giant file per config.
 - `scripts/inspect_sources.py` — queries HF `datasets-server` for size/schema/license
   on all 12 sources from the assignment; writes `configs/sources.yaml`.
+  (3 of the largest sources' exact sizes time out server-side on HF's end --
+  `configs/sources.yaml` falls back to `estimated_via_hub_listing` for
+  those, summing file sizes from the Hub repo listing directly.)
 - `scripts/run_pilot.py` — full Etapas 1-5 pipeline on one small source (`corpus-ptbr-v2`).
 - `scripts/run_all_sources.py` — same pipeline across all 10 available
-  sources, with **per-language** exact dedup (as required by the plan for
-  cross-source overlap), writing `data/processed/{pt,es,hi}.parquet`.
+  sources, with **per-language** exact + near dedup (as required by the
+  plan for cross-source overlap). Streams kept docs to Parquet part files
+  in batches (`data/processed/{pt,es,hi}/<row>__part####.parquet`) instead
+  of holding a whole run in memory, and is resumable: `checkpoint.json`
+  tracks which sources finished, so a crash/timeout only costs re-streaming
+  the one source that was in flight, not the whole run.
+- `scripts/build_final_dataset.py` — Etapa 6: aggregates the per-language
+  parts into the `pt`/`es`/`hi`/`all` config shape via `shuffle_into_shards`.
+- `scripts/slurm/` — SLURM scripts for a Naiss/SUPR run (pilot, full
+  ingest+filter+dedup, Etapa 6 aggregation, HF upload); see its README for
+  how this maps onto (and deviates from) the plan's original 4-stage sketch.
 
 **Blocked** (see `src/ingest/registry.py::BLOCKED_SOURCES`):
 - `CulturaX` — gated dataset, needs an HF token with accepted terms. This
   is the only remaining blocked source; `corpus-carolina` was unblocked
   via `CarolinaAdapter` (see above).
 
-Not yet implemented: the `pt`/`es`/`hi`/`all` config aggregation + HF Hub
-upload (Etapa 6), sharded MinHash dedup at scale, `compute_stats.py`, and
-the SLURM orchestration scripts.
+Not yet implemented: `compute_stats.py` (Etapa 7's schema/language/dedup
+validation checklist -- `funnel_stats.json` from `run_all_sources.py`
+covers part of this already, but not the full checklist), and the actual
+HF Hub upload of a real (non-pilot-scale) corpus.
 
 ## Setup
 
@@ -61,8 +83,15 @@ uv run scripts/inspect_sources.py --only hi-euroweb
 # Fase 1: run the pilot pipeline (streams up to --limit docs)
 uv run scripts/run_pilot.py --limit 2000
 
-# Fase 2: run all 10 available sources -> data/processed/{pt,es,hi}.parquet
+# Fase 2: run all 10 available sources -> data/processed/{pt,es,hi}/*.parquet
+# (resumable via data/processed/checkpoint.json). --limit-per-source and
+# --full are mutually exclusive and one is required -- no silent default,
+# since a real full run is a multi-TB pull (see configs/sources.yaml).
 uv run scripts/run_all_sources.py --limit-per-source 500
+# uv run scripts/run_all_sources.py --full   # real corpus -- see scripts/slurm/ for Naiss/SUPR
+
+# Etapa 6: aggregate into the pt/es/hi/all config shape -> data/final/
+uv run scripts/build_final_dataset.py
 
 # tests
 uv run pytest tests/ -v

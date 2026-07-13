@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Fase 2 test run of Etapa 6 (TASK1-PLAN.md): build the final dataset shape
-from the pilot-scale per-language shards in data/processed/*.parquet
-(produced by run_all_sources.py -- NOT the full corpus, just to see how the
-final output would look).
+"""Etapa 6 (TASK1-PLAN.md): build the final dataset shape from the
+per-language Parquet part files in data/processed/{pt,es,hi}/*.parquet
+(produced by run_all_sources.py, one or more part files per source row).
 
 Writes a local folder shaped exactly like the real HF dataset repo would
 be: one config per language (pt/es/hi) plus a combined `all` config, with a
 README.md declaring the configs the same way HF multi-config datasets do
 (e.g. HuggingFaceFW/fineweb-2). Does NOT upload anywhere.
+
+Uses src.aggregate.shuffle_into_shards: a two-pass streaming shuffle that
+never loads a whole config into memory and writes ~500MB-1GB output shards
+(plan sec 6, Etapa 6 step 4) instead of one giant Parquet file per config.
 """
 
 from __future__ import annotations
@@ -15,11 +18,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pyarrow.parquet as pq
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.aggregate import build_all_config, dedup_stats, shuffle_table
+from src.aggregate import shuffle_into_shards
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LANGUAGES = ["pt", "es", "hi"]
@@ -47,12 +48,13 @@ configs:
     path: all/train-*.parquet
 ---
 
-# llm-und/pretrain-pt-es-hi (PILOT-SCALE TEST BUILD -- not the final corpus)
+# llm-und/pretrain-pt-es-hi
 
-Built from `data/processed/{{pt,es,hi}}.parquet`, themselves produced by a
-300-docs-per-source pilot run across the 10 currently ingestable sources
-(see TASK1-PLAN.md sec 2.1 and README.md for the 2 blocked ones). This is
-here to validate the Etapa 6 aggregation shape end-to-end, not to publish.
+Built from `data/processed/{{pt,es,hi}}/*.parquet`, produced by
+`scripts/run_all_sources.py` across the currently ingestable sources (see
+TASK1-PLAN.md sec 2.1 and README.md for blocked ones). Doc counts below
+reflect whatever run produced the input -- check `data/processed/funnel_stats.json`
+for the ingest/filter/dedup breakdown behind these numbers.
 
 | config | docs |
 |--------|-----:|
@@ -61,27 +63,19 @@ here to validate the Etapa 6 aggregation shape end-to-end, not to publish.
 
 
 def main(in_dir: Path, out_dir: Path) -> None:
-    lang_tables = {}
-    for lang in LANGUAGES:
-        path = in_dir / f"{lang}.parquet"
-        if not path.exists():
-            raise FileNotFoundError(f"{path} not found -- run scripts/run_all_sources.py first")
-        lang_tables[lang] = shuffle_table(pq.read_table(path), seed=PER_LANG_SEED)
-
-    all_table = build_all_config(lang_tables, seed=ALL_CONFIG_SEED)
+    lang_dirs = {lang: in_dir / lang for lang in LANGUAGES}
+    for lang, lang_dir in lang_dirs.items():
+        if not lang_dir.exists() or not any(lang_dir.glob("*.parquet")):
+            raise FileNotFoundError(
+                f"{lang_dir} has no Parquet part files -- run scripts/run_all_sources.py first"
+            )
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    stats = dedup_stats(lang_tables)
-    stats["all"] = all_table.num_rows
+    stats: dict[str, int] = {}
+    for lang, lang_dir in lang_dirs.items():
+        stats[lang] = shuffle_into_shards([lang_dir], out_dir / lang, seed=PER_LANG_SEED)
 
-    for lang, table in lang_tables.items():
-        lang_dir = out_dir / lang
-        lang_dir.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, lang_dir / "train-00000-of-00001.parquet")
-
-    all_dir = out_dir / "all"
-    all_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(all_table, all_dir / "train-00000-of-00001.parquet")
+    stats["all"] = shuffle_into_shards(list(lang_dirs.values()), out_dir / "all", seed=ALL_CONFIG_SEED)
 
     stats_rows = "\n".join(f"| {cfg} | {n:,} |" for cfg, n in stats.items())
     (out_dir / "README.md").write_text(README_TEMPLATE.format(stats_rows=stats_rows))
