@@ -11,7 +11,7 @@
 #   sbatch scripts/slurm/03_upload.sh
 #SBATCH --job-name=llm-und-upload
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
-#SBATCH --partition=CHANGE_ME        # cluster-specific
+#SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G

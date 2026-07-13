@@ -11,7 +11,7 @@
 # Usage: sbatch scripts/slurm/02_build_final.sh
 #SBATCH --job-name=llm-und-build-final
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
-#SBATCH --partition=CHANGE_ME        # cluster-specific
+#SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G                    # bounded by shard size (~750MB), not corpus size

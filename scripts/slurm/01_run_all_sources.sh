@@ -24,7 +24,7 @@
 # Usage: sbatch scripts/slurm/01_run_all_sources.sh
 #SBATCH --job-name=llm-und-ingest
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
-#SBATCH --partition=CHANGE_ME        # cluster-specific
+#SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G

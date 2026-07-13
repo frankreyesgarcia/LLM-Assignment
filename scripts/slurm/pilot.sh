@@ -6,7 +6,7 @@
 # Usage: sbatch scripts/slurm/pilot.sh
 #SBATCH --job-name=llm-und-pilot
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
-#SBATCH --partition=CHANGE_ME        # cluster-specific (e.g. shared/main CPU partition)
+#SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G

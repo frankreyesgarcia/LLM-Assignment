@@ -13,6 +13,18 @@
 export PROJECT_ACCOUNT="${PROJECT_ACCOUNT:?set PROJECT_ACCOUNT to your Naiss allocation, e.g. naiss2026-x-y}"
 export PROJECT_STORAGE="${PROJECT_STORAGE:?set PROJECT_STORAGE to persistent project storage, e.g. /proj/your-project/llm-und}"
 
+# huggingface_hub/datasets default to caching downloads under ~/.cache/huggingface,
+# i.e. $HOME -- which on Berzelius has only a 20GB quota (see scripts/slurm/README.md)
+# and would fill up almost immediately given the multi-TB sources in
+# configs/sources.yaml. Redirect every HF cache location into project storage
+# instead. HF_HOME alone would cover this (HF_HUB_CACHE/HF_DATASETS_CACHE both
+# default to under it), but setting all three explicitly avoids relying on
+# that fallback across library versions.
+export HF_HOME="$PROJECT_STORAGE/hf_cache"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
