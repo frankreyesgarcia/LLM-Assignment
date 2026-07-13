@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from src.filters.language import line_language
+
 _CONTROL_CHARS_RE = re.compile(
     "[" + "".join(chr(c) for c in range(0, 32) if c not in (9, 10, 13)) + "\x7f]"
 )
@@ -69,12 +71,40 @@ def dedupe_consecutive_lines(text: str) -> str:
     return "\n".join(out_lines)
 
 
-def clean_text(text: str) -> str:
+MIN_WORDS_FOR_LINE_DROP = 8
+
+# langid regularly misclassifies plain Devanagari Hindi as Marathi/Nepali on
+# short-to-medium lines (same script, overlapping vocabulary, too little
+# context to disambiguate) -- that's a langid weakness, not evidence the line
+# is foreign, so treat those calls as "close enough to hi" rather than drop.
+_HINDI_ACCEPTED = {"hi", "mr", "ne"}
+
+
+def strip_foreign_lines(text: str, language: str) -> str:
+    """Drop lines langid confidently classifies as a different language.
+
+    We only apply this to Hindi because Hindi has a different script (Devanagari) than the other languages we ingest.
+    Also, MIN_WORDS_FOR_LINE_DROP is used to avoid dropping short lines that may be misclassified by langid, especially for Hindi eg. 1. टुण्ड्रा (Tundra Biome).
+    """
+    if language != "hi":
+        return text
+    kept = [
+        line
+        for line in text.split("\n")
+        if len(line.split()) < MIN_WORDS_FOR_LINE_DROP
+        or line_language(line) in _HINDI_ACCEPTED | {None}
+    ]
+    return "\n".join(kept)
+
+
+def clean_text(text: str, language: str | None = None) -> str:
     """Full cleaning pipeline, in the order described in the plan (Etapa 3)."""
     text = normalize_unicode(text)
     text = strip_control_chars(text)
     text = fix_mojibake(text)
     text = unescape_literal_whitespace(text)
+    if language is not None:
+        text = strip_foreign_lines(text, language)
     text = collapse_whitespace(text)
     text = dedupe_consecutive_lines(text)
     return text

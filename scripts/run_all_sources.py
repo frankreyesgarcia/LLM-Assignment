@@ -182,7 +182,7 @@ def process_source(
             funnel[f"{row}:dropped_language"] += 1
             continue
 
-        doc.text = clean_text(doc.text)
+        doc.text = clean_text(doc.text, doc.language)
         if not doc.text:
             funnel[f"{row}:dropped_empty"] += 1
             continue
