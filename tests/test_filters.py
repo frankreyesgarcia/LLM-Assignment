@@ -4,6 +4,7 @@ from src.filters.clean import (
     fix_mojibake,
     strip_control_chars,
     unescape_literal_whitespace,
+    strip_foreign_lines,
 )
 from src.filters.language import hard_filter
 from src.filters.quality import QualityConfig, check_quality
@@ -68,6 +69,28 @@ def test_unescape_literal_whitespace_splits_paragraphs():
         "बादल पृथ्वी के मौसम और जलवायु का एक महत्वपूर्ण हिस्सा हैं।",
         "आकाश में जल से बादल बनते हैं।",
     ]
+
+
+def test_strip_foreign_lines_drops_english_heavy_doc_via_quality():
+    text = (
+        "28 - Beginners' English Grammar - Past Perfect Continuous Tense\n"
+        "Past में किसी समय विशेष से पहले कोई काम शुरू हो और उसी समय विशेष के बाद भी चलता चला "
+        "जाए तो ऐसे काम का 'Past Perfect Continuous Tense' के तहत उल्लेख किया गया है। इस "
+        "वीडियो में इस टेंस को बड़े आसान तरीके से समझाया गया है।\n"
+        "If we need to talk about an action that began well before a particular point in "
+        "time and keeps going on even after the said time, it is mentioned in 'Past Perfect "
+        "Continuous Tense'. This video simplifies and presents this very tense."
+    )
+    cleaned = strip_foreign_lines(text, "hi")
+
+    assert cleaned == (
+        # >>> langid.classify("28 - Beginners' English Grammar - Past Perfect Continuous Tense\n")
+        #     ('it', -23.853219032287598)
+        "Past में किसी समय विशेष से पहले कोई काम शुरू हो और उसी समय विशेष के बाद भी चलता चला "
+        "जाए तो ऐसे काम का 'Past Perfect Continuous Tense' के तहत उल्लेख किया गया है। इस वीडियो में इस टेंस को बड़े आसान तरीके से समझाया गया है।"
+        # >>> langid.classify("If we need to talk about an action that began well before a particular point in time and keeps going on even after the said time, it is mentioned in 'Past Perfect Continuous Tense'. This video simplifies and presents this very tense.")
+        #     ('en',  -422.0204813480377)
+    )
 
 
 # --- quality.py ---

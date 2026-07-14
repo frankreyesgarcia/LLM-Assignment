@@ -53,3 +53,19 @@ def target_language_confidence(doc: Document) -> float:
 def soft_filter(doc: Document, min_confidence: float = DEFAULT_MIN_CONFIDENCE) -> bool:
     """True if the doc passes the soft check: confidence in declared language >= threshold."""
     return target_language_confidence(doc) >= min_confidence
+
+
+MIN_LINE_CHARS_FOR_CLASSIFICATION = 15
+
+
+def line_language(line: str) -> str | None:
+    """langid's top-ranked language code for a single line.
+
+    None if langid isn't installed, or the line is too short to classify
+    reliably (a handful of words is easy for langid to get wrong -- e.g. a
+    short Hindi caption or a numbered label).
+    """
+    if not _LANGID_AVAILABLE or len(line.strip()) < MIN_LINE_CHARS_FOR_CLASSIFICATION:
+        return None
+    lang, _ = langid.classify(line)
+    return lang

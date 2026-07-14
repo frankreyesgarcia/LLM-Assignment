@@ -70,7 +70,7 @@ def run_pilot(limit: int, out_path: Path, dropped_samples_path: Path) -> None:
             funnel["dropped_lang_soft"] += 1
             continue
 
-        doc.text = clean_text(doc.text)
+        doc.text = clean_text(doc.text, doc.language)
         if not doc.text:
             funnel["dropped_empty_after_clean"] += 1
             continue
