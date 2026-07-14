@@ -5,11 +5,10 @@ Covers corpus-carolina, Portuguese-PD, corpus-ptbr-v2 (TASK1-PLAN.md sec 5, Etap
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterator
 
-from datasets import load_dataset
-
-from src.ingest.base import Document, SourceAdapter
+from src.ingest.base import Document, SourceAdapter, load_local_or_remote_dataset
 
 
 class GenericTextAdapter(SourceAdapter):
@@ -26,6 +25,7 @@ class GenericTextAdapter(SourceAdapter):
         limit: int | None = None,
         streaming: bool = True,
         trust_remote_code: bool = False,
+        local_files: list[Path] | None = None,
     ) -> None:
         self.name = name
         self.repo_id = repo_id
@@ -38,14 +38,18 @@ class GenericTextAdapter(SourceAdapter):
         self.limit = limit
         self.streaming = streaming
         self.trust_remote_code = trust_remote_code
+        # If set (scripts/download_sources.py already pulled this source's
+        # files to local disk), read those directly instead of streaming
+        # over the network -- see registry.build_adapter's `raw_dir` param.
+        # A single load_dataset(..., streaming=True) connection measured
+        # ~8 MB/s regardless of link speed; many concurrent connections
+        # (what the download step uses) measured ~65 MB/s aggregate on the
+        # same repos.
+        self.local_files = local_files
 
     def iter_documents(self) -> Iterator[Document]:
-        ds = load_dataset(
-            self.repo_id,
-            self.config,
-            split=self.split,
-            streaming=self.streaming,
-            trust_remote_code=self.trust_remote_code,
+        ds = load_local_or_remote_dataset(
+            self.repo_id, self.config, self.split, self.streaming, self.local_files, self.trust_remote_code
         )
 
         count = 0

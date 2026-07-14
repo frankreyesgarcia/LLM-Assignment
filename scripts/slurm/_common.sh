@@ -25,6 +25,18 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE"
 
+# huggingface_hub derives its cached-login token path from HF_HOME too, so
+# redirecting HF_HOME above (necessarily) also moves where it looks for the
+# token written by `hf auth login` -- it won't find one saved under the
+# default $HOME/.cache/huggingface. Read the real default location once
+# here so jobs authenticate without every script remembering to do this:
+# unauthenticated requests were observed both throttled (~8 MB/s vs. ~65
+# MB/s aggregate authenticated/parallel, see scripts/download_sources.py)
+# and occasionally 403/500 from HF's Xet CDN.
+if [ -z "${HF_TOKEN:-}" ] && [ -f "$HOME/.cache/huggingface/token" ]; then
+    export HF_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 

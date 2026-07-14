@@ -20,7 +20,10 @@
 # fail (the parent wouldn't exist yet). Keep these flat under runs/ with
 # the job id in the filename instead; `mkdir -p runs` once is enough.
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+# sbatch copies this script into a spool dir before running it, so
+# $(dirname "${BASH_SOURCE[0]}") no longer points at scripts/slurm/ --
+# use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
 uv run scripts/run_pilot.py \
     --limit 2000 \

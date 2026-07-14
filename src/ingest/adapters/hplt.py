@@ -8,11 +8,10 @@ GenericTextAdapter (see configs/sources.yaml, rows es-hplt2 / hi-hplt2).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterator
 
-from datasets import load_dataset
-
-from src.ingest.base import Document, SourceAdapter, normalize_language_code
+from src.ingest.base import Document, SourceAdapter, load_local_or_remote_dataset, normalize_language_code
 
 
 class HPLTAdapter(SourceAdapter):
@@ -26,6 +25,7 @@ class HPLTAdapter(SourceAdapter):
         limit: int | None = None,
         streaming: bool = True,
         min_lang_prob: float = 0.5,
+        local_files: list[Path] | None = None,
     ) -> None:
         self.name = name
         self.repo_id = repo_id
@@ -35,9 +35,11 @@ class HPLTAdapter(SourceAdapter):
         self.limit = limit
         self.streaming = streaming
         self.min_lang_prob = min_lang_prob
+        # See GenericTextAdapter.local_files -- same local-vs-streamed switch.
+        self.local_files = local_files
 
     def iter_documents(self) -> Iterator[Document]:
-        ds = load_dataset(self.repo_id, self.config, split=self.split, streaming=self.streaming)
+        ds = load_local_or_remote_dataset(self.repo_id, self.config, self.split, self.streaming, self.local_files)
 
         count = 0
         for row in ds:

@@ -22,7 +22,10 @@
 # NOTE: `runs/` must already exist before submission -- see pilot.sh for why
 # a per-job-id subdirectory wouldn't work here.
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+# sbatch copies this script into a spool dir before running it, so
+# $(dirname "${BASH_SOURCE[0]}") no longer points at scripts/slurm/ --
+# use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
 uv run python - <<PYEOF 2>&1 | tee "$LOG_DIR/build_final.log"
 import sys

@@ -38,18 +38,35 @@ Implemented so far (Fase 0 through most of Fase 5 of the plan):
   `configs/sources.yaml` falls back to `estimated_via_hub_listing` for
   those, summing file sizes from the Hub repo listing directly.)
 - `scripts/run_pilot.py` — full Etapas 1-5 pipeline on one small source (`corpus-ptbr-v2`).
-- `scripts/run_all_sources.py` — same pipeline across all 10 available
-  sources, with **per-language** exact + near dedup (as required by the
-  plan for cross-source overlap). Streams kept docs to Parquet part files
-  in batches (`data/processed/{pt,es,hi}/<row>__part####.parquet`) instead
-  of holding a whole run in memory, and is resumable: `checkpoint.json`
-  tracks which sources finished, so a crash/timeout only costs re-streaming
-  the one source that was in flight, not the whole run.
+- `scripts/download_sources.py` — bulk-downloads every available source's
+  raw files to local disk with many concurrent connections
+  (`huggingface_hub.snapshot_download`), before any filtering/dedup runs.
+  A single `datasets(streaming=True)` connection (what `run_all_sources.py`
+  falls back to without `--raw-dir`) measured ~8 MB/s regardless of link
+  speed and occasionally 403/500'd from HF's Xet CDN under sustained load;
+  many concurrent connections measured ~61-66 MB/s aggregate on the same
+  repos (~7-8x). Resumable for free (`snapshot_download` skips files
+  already present and up to date).
+- `scripts/run_all_sources.py` — same Etapas 1-5 pipeline across all 10
+  available sources, now split into two phases for parallelism: a
+  **filter phase** (ingest -> language filter -> clean -> quality) that
+  runs one worker process per source at once via `--max-workers` (no
+  shared state, so this is where pre-downloading pays off -- a streamed
+  connection can't be split across processes, a local file can), then a
+  **dedup phase** that runs serially, with **per-language** exact + near
+  dedup shared across every source in a fixed order (as required by the
+  plan for cross-source overlap -- this can't be parallelized without
+  breaking that guarantee). Both phases stream kept docs to Parquet part
+  files in batches (`data/processed/{pt,es,hi}/<row>__part####.parquet`,
+  same final shape as before) instead of holding a whole run in memory,
+  and are independently resumable/checkpointed, so a crash/timeout only
+  costs redoing whatever source was in flight in that phase.
 - `scripts/build_final_dataset.py` — Etapa 6: aggregates the per-language
   parts into the `pt`/`es`/`hi`/`all` config shape via `shuffle_into_shards`.
-- `scripts/slurm/` — SLURM scripts for a Naiss/SUPR run (pilot, full
-  ingest+filter+dedup, Etapa 6 aggregation, HF upload); see its README for
-  how this maps onto (and deviates from) the plan's original 4-stage sketch.
+  Unchanged by the above -- the two-phase split still ends in the same
+  output layout.
+- `scripts/slurm/` — SLURM scripts for a Naiss/SUPR run (download, full
+  filter+dedup, Etapa 6 aggregation, HF upload).
 
 **Blocked** (see `src/ingest/registry.py::BLOCKED_SOURCES`):
 - `CulturaX` — gated dataset, needs an HF token with accepted terms. This
@@ -83,12 +100,27 @@ uv run scripts/inspect_sources.py --only hi-euroweb
 # Fase 1: run the pilot pipeline (streams up to --limit docs)
 uv run scripts/run_pilot.py --limit 2000
 
-# Fase 2: run all 10 available sources -> data/processed/{pt,es,hi}/*.parquet
-# (resumable via data/processed/checkpoint.json). --limit-per-source and
-# --full are mutually exclusive and one is required -- no silent default,
-# since a real full run is a multi-TB pull (see configs/sources.yaml).
+# Fase 2a (optional but recommended for a real run): bulk-download every
+# source's raw files first, with many concurrent connections -> data/raw/.
+# `datasets(streaming=True)` (what run_all_sources.py falls back to without
+# --raw-dir) is a single throttled connection per source -- measured ~8 MB/s
+# regardless of link speed, and occasionally 403/500s from HF's Xet CDN
+# under sustained load. snapshot_download instead measured ~61-66 MB/s
+# aggregate on the same repos (~7-8x). See scripts/download_sources.py.
+uv run scripts/download_sources.py
+
+# Fase 2: run all 10 available sources -> data/processed/{pt,es,hi}/*.parquet.
+# Two phases (see scripts/run_all_sources.py's docstring): a parallel
+# per-source filter phase (--max-workers, CPU-bound once files are local)
+# then a serial cross-source dedup phase (dedup state is intentionally
+# shared per language, to catch e.g. the same doc in both fineweb2 and
+# EuroWeb). Both phases are independently resumable/checkpointed.
+# --limit-per-source and --full are mutually exclusive and one is required
+# -- no silent default, since a real full run is a multi-TB pull (see
+# configs/sources.yaml). Pass --raw-dir to read Fase 2a's local download
+# instead of streaming from the Hub.
 uv run scripts/run_all_sources.py --limit-per-source 500
-# uv run scripts/run_all_sources.py --full   # real corpus -- see scripts/slurm/ for Naiss/SUPR
+# uv run scripts/run_all_sources.py --full --raw-dir data/raw   # real corpus -- see scripts/slurm/ for Naiss/SUPR
 
 # Etapa 6: aggregate into the pt/es/hi/all config shape -> data/final/
 uv run scripts/build_final_dataset.py

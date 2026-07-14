@@ -6,7 +6,10 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator
+
+from datasets import load_dataset
 
 VALID_LANGUAGES = {"pt", "es", "hi"}
 
@@ -66,6 +69,24 @@ class Document:
             "url": self.url,
             "metadata": json.dumps(self.metadata, ensure_ascii=False, default=str),
         }
+
+
+def load_local_or_remote_dataset(
+    repo_id: str,
+    config: str | None,
+    split: str,
+    streaming: bool,
+    local_files: list[Path] | None,
+    trust_remote_code: bool = False,
+):
+    """Shared by GenericTextAdapter and HPLTAdapter: read `local_files`
+    (already pulled down by scripts/download_sources.py, see
+    registry.build_adapter's `raw_dir` param) if given, else stream from the
+    Hub as before.
+    """
+    if local_files:
+        return load_dataset("parquet", data_files=[str(p) for p in local_files], split="train", streaming=streaming)
+    return load_dataset(repo_id, config, split=split, streaming=streaming, trust_remote_code=trust_remote_code)
 
 
 class SourceAdapter(ABC):
