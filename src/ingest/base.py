@@ -20,6 +20,7 @@ LANGUAGE_CODE_MAP = {
     "spa_latn": "es",
     "es": "es",
     "por": "pt",
+    "por_latn": "pt",
     "pt": "pt",
     "ptbr": "pt",
     "pt-br": "pt",

@@ -34,8 +34,8 @@
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
 #SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=18            # filter phase's useful ceiling = number of sources (18, see registry.AVAILABLE_ROWS)
+#SBATCH --mem=150G
 #SBATCH --time=24:00:00              # generous but not unlimited -- rely on --requeue for multi-day runs
 #SBATCH --requeue
 #SBATCH --output=runs/%j-01_ingest.out

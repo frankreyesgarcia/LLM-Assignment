@@ -53,6 +53,7 @@ def test_document_rejects_invalid_language():
         ("SPA", "es"),
         ("pt-BR", "pt"),
         ("ptbr", "pt"),
+        ("por_Latn", "pt"),
         ("hin_Deva", "hi"),
         ("fr", None),
         ("", None),
