@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 from abc import ABC, abstractmethod
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from datasets import load_dataset
+from huggingface_hub import HfApi
 
 VALID_LANGUAGES = {"pt", "es", "hi"}
 
@@ -71,6 +73,29 @@ class Document:
         }
 
 
+def resolve_remote_data_files(repo_id: str, patterns: list[str]) -> list[str]:
+    """Glob-match `patterns` (same shape as registry.SOURCE_DOWNLOAD_SPECS,
+    e.g. "pt/high/*.parquet") against a repo's file listing, returning
+    `hf://datasets/...` URIs `load_dataset("parquet", data_files=...)` can
+    stream directly. Used for repos whose own loading script/config can't
+    be used as-is (see GenericTextAdapter's `remote_glob_patterns`).
+
+    Lists each pattern's non-wildcard prefix directory only (via
+    `list_repo_tree(path_in_repo=...)`), not the whole repo -- for
+    EuroWeb-2512 (10,219 parquet files across every language/tier) or
+    CulturaX, a flat `list_repo_files()` + client-side filter would pull
+    down and scan a listing orders of magnitude larger than what any single
+    row actually needs.
+    """
+    matched: set[str] = set()
+    for pattern in patterns:
+        prefix = pattern.rsplit("/", 1)[0] if "/" in pattern else ""
+        for item in HfApi().list_repo_tree(repo_id, path_in_repo=prefix, repo_type="dataset"):
+            if fnmatch.fnmatch(item.path, pattern):
+                matched.add(item.path)
+    return sorted(f"hf://datasets/{repo_id}/{f}" for f in matched)
+
+
 def load_local_or_remote_dataset(
     repo_id: str,
     config: str | None,
@@ -78,14 +103,23 @@ def load_local_or_remote_dataset(
     streaming: bool,
     local_files: list[Path] | None,
     trust_remote_code: bool = False,
+    remote_glob_patterns: list[str] | None = None,
 ):
     """Shared by GenericTextAdapter and HPLTAdapter: read `local_files`
     (already pulled down by scripts/download_sources.py, see
-    registry.build_adapter's `raw_dir` param) if given, else stream from the
-    Hub as before.
+    registry.build_adapter's `raw_dir` param) if given. Otherwise, for repos
+    whose loading script can't be used directly (e.g. CulturaX's own script
+    predates `datasets>=4` dropping trust_remote_code, same class of issue
+    as CarolinaAdapter) or that need more files than a single config/split
+    covers (e.g. EuroWeb-2512's multiple quality tiers), resolve an explicit
+    remote file list via `remote_glob_patterns` instead. Otherwise stream via
+    the repo's own config/split as before.
     """
     if local_files:
         return load_dataset("parquet", data_files=[str(p) for p in local_files], split="train", streaming=streaming)
+    if remote_glob_patterns:
+        uris = resolve_remote_data_files(repo_id, remote_glob_patterns)
+        return load_dataset("parquet", data_files=uris, split="train", streaming=streaming)
     return load_dataset(repo_id, config, split=split, streaming=streaming, trust_remote_code=trust_remote_code)
 
 

@@ -26,6 +26,7 @@ class GenericTextAdapter(SourceAdapter):
         streaming: bool = True,
         trust_remote_code: bool = False,
         local_files: list[Path] | None = None,
+        remote_glob_patterns: list[str] | None = None,
     ) -> None:
         self.name = name
         self.repo_id = repo_id
@@ -46,10 +47,20 @@ class GenericTextAdapter(SourceAdapter):
         # (what the download step uses) measured ~65 MB/s aggregate on the
         # same repos.
         self.local_files = local_files
+        # Fallback for the no-local_files (streaming) case, for repos whose
+        # own repo_id/config/split loading doesn't work as-is -- see
+        # load_local_or_remote_dataset.
+        self.remote_glob_patterns = remote_glob_patterns
 
     def iter_documents(self) -> Iterator[Document]:
         ds = load_local_or_remote_dataset(
-            self.repo_id, self.config, self.split, self.streaming, self.local_files, self.trust_remote_code
+            self.repo_id,
+            self.config,
+            self.split,
+            self.streaming,
+            self.local_files,
+            self.trust_remote_code,
+            self.remote_glob_patterns,
         )
 
         count = 0

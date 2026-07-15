@@ -12,15 +12,31 @@ dataset (see "Task 2 — Tokenizer" below).
 Implemented so far (Fase 0 through most of Fase 5 of the plan):
 
 - `src/ingest/` — unified schema (`Document`), `SourceAdapter` interface,
-  `GenericTextAdapter` (covers 7 of the 12 sources as-is), `HPLTAdapter`
-  (HPLT's `lang`/`prob` columns are lists, not scalars), `CarolinaAdapter`
-  (bespoke loader for corpus-carolina's gzipped TEI-XML shards -- its HF
-  loading script is no longer supported, so this reads the repo's raw
-  `corpus/{taxonomy}/**/*.xml.gz` files directly via streaming download +
-  incremental XML parse), and `registry.py` — a factory (`build_adapter(row)`)
-  mapping all 10 currently ingestable sources to a configured adapter, plus
-  a hard guard that fails fast if EuroWeb Hindi is ever requested with a
-  split other than `high`.
+  `GenericTextAdapter` (covers most sources with a flat text column,
+  including CulturaX and EuroWeb-2512 via an explicit remote file-glob
+  fallback -- see below), `HPLTAdapter` (HPLT's `lang`/`prob` columns are
+  lists, not scalars), `CarolinaAdapter` (bespoke loader for
+  corpus-carolina's gzipped TEI-XML shards -- its HF loading script is no
+  longer supported, so this reads the repo's raw
+  `corpus/{taxonomy}/**/*.xml.gz` files directly, via `hf_hub_download`),
+  and `registry.py` — a factory (`build_adapter(row)`) mapping all 18
+  currently ingestable sources (pt/es/hi × their available source rows) to
+  a configured adapter. CulturaX and EuroWeb-2512 can't be streamed via a
+  plain `repo_id`/`config`/`split` `load_dataset` call (CulturaX's own
+  loading script predates `datasets>=4` dropping `trust_remote_code`, same
+  issue as corpus-carolina; EuroWeb needs several quality tiers glued
+  together, not one split) -- both resolve an explicit remote file list
+  instead (`GenericTextAdapter.remote_glob_patterns`, see
+  `src/ingest/base.py::resolve_remote_data_files`). EuroWeb-2512 has 5
+  quality tiers per language; Hindi is hard-restricted to `high` only
+  (non-`high` Hindi tiers are asserted to contain sexual content per the
+  assignment brief -- not documented in EuroWeb-2512's own dataset card or
+  in its classifier's (`utter-project/EuroFilter-v1`, an educational-quality
+  classifier, not a safety filter) model card, so this can't be
+  independently verified from this repo, but is kept as a hard constraint
+  regardless); es/pt use all 5 tiers for volume, since our own downstream
+  language/quality/dedup filters still screen every document regardless of
+  tier.
 - `src/filters/` — language hard/soft filter, text cleaning, quality heuristics.
 - `src/dedup/` — exact dedup (SHA256, in-memory) and near dedup (MinHash +
   LSH), two near-dedup backends: `NearDeduper` (in-memory, for
@@ -47,7 +63,7 @@ Implemented so far (Fase 0 through most of Fase 5 of the plan):
   many concurrent connections measured ~61-66 MB/s aggregate on the same
   repos (~7-8x). Resumable for free (`snapshot_download` skips files
   already present and up to date).
-- `scripts/run_all_sources.py` — same Etapas 1-5 pipeline across all 10
+- `scripts/run_all_sources.py` — same Etapas 1-5 pipeline across all 18
   available sources, now split into two phases for parallelism: a
   **filter phase** (ingest -> language filter -> clean -> quality) that
   runs one worker process per source at once via `--max-workers` (no
@@ -68,10 +84,11 @@ Implemented so far (Fase 0 through most of Fase 5 of the plan):
 - `scripts/slurm/` — SLURM scripts for a Naiss/SUPR run (download, full
   filter+dedup, Etapa 6 aggregation, HF upload).
 
-**Blocked** (see `src/ingest/registry.py::BLOCKED_SOURCES`):
-- `CulturaX` — gated dataset, needs an HF token with accepted terms. This
-  is the only remaining blocked source; `corpus-carolina` was unblocked
-  via `CarolinaAdapter` (see above).
+**Blocked:** none currently -- `CulturaX` was the last blocked source (gated,
+needed an HF token with accepted terms) and is now accessible; it ingests
+as `{pt,es,hi}-culturax` via `GenericTextAdapter`'s remote-glob fallback
+(see above), bypassing its unsupported loading script the same way
+`corpus-carolina` does.
 
 Not yet implemented: `compute_stats.py` (Etapa 7's schema/language/dedup
 validation checklist -- `funnel_stats.json` from `run_all_sources.py`
@@ -109,7 +126,7 @@ uv run scripts/run_pilot.py --limit 2000
 # aggregate on the same repos (~7-8x). See scripts/download_sources.py.
 uv run scripts/download_sources.py
 
-# Fase 2: run all 10 available sources -> data/processed/{pt,es,hi}/*.parquet.
+# Fase 2: run all 18 available sources -> data/processed/{pt,es,hi}/*.parquet.
 # Two phases (see scripts/run_all_sources.py's docstring): a parallel
 # per-source filter phase (--max-workers, CPU-bound once files are local)
 # then a serial cross-source dedup phase (dedup state is intentionally
