@@ -46,6 +46,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -68,6 +69,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKPOINT_NAME = "checkpoint.json"
 FILTER_CHECKPOINT_NAME = "filter_checkpoint.json"
 DEFAULT_BATCH_SIZE = 20_000
+# How often (in ingested docs) filter_source logs progress. Keyed off
+# `ingested`, not `kept`, on purpose: a source that's busy-looping without
+# keeping anything (e.g. the por_Latn language-code bug -- scanned 178k+
+# raw rows keeping zero before it was found) still advances `ingested`,
+# so this catches that failure mode too, not just a fully-idle worker.
+PROGRESS_LOG_INTERVAL = 10_000
 FUNNEL_STAGES = (
     "ingested",
     "dropped_language",
@@ -160,6 +167,8 @@ def filter_source(
     buffers: dict[str, list[dict]] = {}
     part_seq: dict[str, int] = {}
     parts_by_lang: dict[str, list[str]] = {}
+    start_time = time.time()
+    next_log_at = PROGRESS_LOG_INTERVAL
 
     def flush(lang: str) -> None:
         rows = buffers.get(lang)
@@ -173,6 +182,14 @@ def filter_source(
 
     for doc in adapter.iter_documents():
         funnel[f"{row}:ingested"] += 1
+        if funnel[f"{row}:ingested"] >= next_log_at:
+            elapsed = time.time() - start_time
+            print(
+                f"[{row}] ingested={funnel[f'{row}:ingested']:,} "
+                f"kept={funnel[f'{row}:kept_prefilter']:,} elapsed={elapsed:.0f}s",
+                flush=True,
+            )
+            next_log_at += PROGRESS_LOG_INTERVAL
 
         if not hard_filter(doc) or not soft_filter(doc):
             funnel[f"{row}:dropped_language"] += 1
