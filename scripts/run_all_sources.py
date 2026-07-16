@@ -143,6 +143,18 @@ def filter_source(
     here, since that state has to stay shared and serial across sources
     (see run_dedup_phase / dedup_source below).
     """
+    # pyarrow defaults its CPU/IO thread pools to ~os.cpu_count() *per
+    # process* (we observed ~70+ threads per worker on this node's 128
+    # cores). With --max-workers processes doing this at once, that's
+    # 1000+ threads competing for scheduling on a Berzelius node shared
+    # with other users' jobs (observed system load average >500 on a
+    # 128-core node) -- severe enough oversubscription that some threads
+    # effectively never get scheduled, which looks identical to a hang
+    # from the outside (0% CPU, no progress, no error). Capping both pools
+    # per-worker keeps our own footprint small regardless of --max-workers.
+    pa.set_cpu_count(2)
+    pa.set_io_thread_count(4)
+
     funnel: Counter[str] = Counter()
     adapter = build_adapter(row, limit=limit_per_source, raw_dir=raw_dir)
     buffers: dict[str, list[dict]] = {}
