@@ -1,99 +1,88 @@
 # LLM-UND — pre-training data pipeline + tokenizer
 
-Task 1: pipeline for filtering, cleaning, and deduplicating PT/ES/HI
-pre-training data into a single HF dataset (`frank-rg/LLM-Assignment`).
-See `TASK1-PLAN.md` for the full design.
+Task 1: dedup pipeline for PT/ES/HI pre-training data into a single HF
+dataset. Scope is deliberately narrow -- 4 sources only:
+
+- `pt-fineweb2`, `es-fineweb2`, `hi-fineweb2` (HuggingFaceFW/fineweb-2)
+- `hi-sangraha` (`ai4bharat/sangraha`'s "verified" split -- human-verified
+  sites + OCR'd PDFs + transcribed speech, the one hi source that isn't
+  itself another Common-Crawl derivative)
+
+No language/quality filtering or cleaning is applied -- sources are used
+as-is; cross-source MinHash dedup is the only processing step (see
+below for why hi-fineweb2/hi-sangraha specifically needed checking: they
+measured ~2% raw overlap by hand before this pipeline existed).
 
 Task 2: a shared multilingual byte-level BPE tokenizer trained on that
-dataset (see "Task 2 — Tokenizer" below).
+corpus (see "Task 2 — Tokenizer" below).
 
 ## Status
 
-Implemented so far (Fase 0 through most of Fase 5 of the plan):
+- `src/sources.py` — the source-of-truth for the 4 supported rows:
+  `VALID_LANGUAGES`, `SOURCE_SPECS` (repo_id + glob pattern + text/id
+  column names, confirmed against each repo's real file layout), and
+  `ROWS_BY_LANGUAGE` (pt/es get one row each; hi gets two, since
+  hi-fineweb2 and hi-sangraha need to dedup *against each other*).
+- `scripts/download_sources.py` — bulk-downloads the 4 sources' raw files
+  to local disk with many concurrent connections
+  (`huggingface_hub.snapshot_download`). A single `datasets(streaming=True)`
+  connection measured ~8 MB/s regardless of link speed and occasionally
+  403/500'd from HF's Xet CDN under sustained load; many concurrent
+  connections measured ~61-66 MB/s aggregate on the same repos (~7-8x).
+  Resumable for free (`snapshot_download` skips files already present and
+  up to date).
+- `scripts/run_dedup_datatrove.py` — the main pipeline: cross-source
+  MinHash dedup using [`datatrove`](https://github.com/huggingface/datatrove)
+  (HuggingFace's own pipeline library -- literally what built fineweb-2
+  itself), not a from-scratch implementation. Runs the standard 4-stage
+  flow (`MinhashDedupSignature` -> `MinhashDedupBuckets` ->
+  `MinhashDedupCluster` -> `MinhashDedupFilter`) once per language, writing
+  deduped output to `data/processed/{lang}/*.parquet`. For hi, the
+  hi-fineweb2 and hi-sangraha readers are chained back-to-back in the same
+  pipeline (datatrove's `BaseDiskReader.run()` does `if data: yield from
+  data` before yielding its own docs, so two readers concatenate into one
+  shared stream) -- that's what makes the two sources dedup against each
+  other, not just internally.
 
-- `src/ingest/` — unified schema (`Document`), `SourceAdapter` interface,
-  `GenericTextAdapter` (covers most sources with a flat text column,
-  including CulturaX and EuroWeb-2512 via an explicit remote file-glob
-  fallback -- see below), `HPLTAdapter` (HPLT's `lang`/`prob` columns are
-  lists, not scalars), `CarolinaAdapter` (bespoke loader for
-  corpus-carolina's gzipped TEI-XML shards -- its HF loading script is no
-  longer supported, so this reads the repo's raw
-  `corpus/{taxonomy}/**/*.xml.gz` files directly, via `hf_hub_download`),
-  and `registry.py` — a factory (`build_adapter(row)`) mapping all 18
-  currently ingestable sources (pt/es/hi × their available source rows) to
-  a configured adapter. CulturaX and EuroWeb-2512 can't be streamed via a
-  plain `repo_id`/`config`/`split` `load_dataset` call (CulturaX's own
-  loading script predates `datasets>=4` dropping `trust_remote_code`, same
-  issue as corpus-carolina; EuroWeb needs several quality tiers glued
-  together, not one split) -- both resolve an explicit remote file list
-  instead (`GenericTextAdapter.remote_glob_patterns`, see
-  `src/ingest/base.py::resolve_remote_data_files`). EuroWeb-2512 has 5
-  quality tiers per language; Hindi is hard-restricted to `high` only
-  (non-`high` Hindi tiers are asserted to contain sexual content per the
-  assignment brief -- not documented in EuroWeb-2512's own dataset card or
-  in its classifier's (`utter-project/EuroFilter-v1`, an educational-quality
-  classifier, not a safety filter) model card, so this can't be
-  independently verified from this repo, but is kept as a hard constraint
-  regardless); es/pt use all 5 tiers for volume, since our own downstream
-  language/quality/dedup filters still screen every document regardless of
-  tier.
-- `src/filters/` — language hard/soft filter, text cleaning, quality heuristics.
-- `src/dedup/` — exact dedup (SHA256, in-memory) and near dedup (MinHash +
-  LSH), two near-dedup backends: `NearDeduper` (in-memory, for
-  `run_pilot.py`/tests) and `SqliteNearDeduper` (LSH buckets + signatures
-  in a SQLite file instead of a Python dict, so the index doesn't have to
-  fit in RAM -- what `run_all_sources.py` uses).
+  Uses a custom `WhitespaceWordTokenizer` for MinHash shingling instead of
+  datatrove's language-routed tokenizers: pt/es route to `SpaCyTokenizer`
+  (needs `spacy` + a downloaded model) and hi routes to
+  `StanzaTokenizer("kmr")` (needs `stanza`, which pulls in a full PyTorch +
+  CUDA stack just to split words) -- confirmed by hitting both import
+  errors directly. A plain `str.split()` tokenizer (same approach the
+  removed from-scratch dedup always used) avoids both, with zero
+  correctness cost for shingling purposes.
+
+  `--executor {local,slurm}`: `local` uses `LocalPipelineExecutor`
+  (single-node, for smoke-testing with `--limit`); `slurm` uses
+  `SlurmPipelineExecutor`, which shards each stage across a real SLURM job
+  array (`--tasks`) -- this is the actual fix for the parallelism ceiling
+  the old pipeline had (measured ~30 docs/sec for fineweb2 and ~4.25
+  docs/sec for hi-sangraha under the old single-worker-per-source design,
+  putting a full run at ~46+ hours; `SlurmPipelineExecutor` scales
+  horizontally across nodes instead of being capped at one core per
+  source).
+- `configs/dedup.yaml` — `MinhashConfig` fields (`n_grams`, `num_buckets`,
+  `hashes_per_bucket`, `seed`), starting from datatrove's own documented
+  defaults.
 - `src/aggregate.py` — `shuffle_into_shards`: two-pass streaming shuffle
   (stream input -> randomly partition into K shards sized off on-disk
   bytes -> locally shuffle each bounded-size shard) so Etapa 6 never loads
   a whole language into memory and writes ~500MB-1GB output shards instead
-  of one giant file per config.
-- `scripts/inspect_sources.py` — queries HF `datasets-server` for size/schema/license
-  on all 12 sources from the assignment; writes `configs/sources.yaml`.
-  (3 of the largest sources' exact sizes time out server-side on HF's end --
-  `configs/sources.yaml` falls back to `estimated_via_hub_listing` for
-  those, summing file sizes from the Hub repo listing directly.)
-- `scripts/run_pilot.py` — full Etapas 1-5 pipeline on one small source (`corpus-ptbr-v2`).
-- `scripts/download_sources.py` — bulk-downloads every available source's
-  raw files to local disk with many concurrent connections
-  (`huggingface_hub.snapshot_download`), before any filtering/dedup runs.
-  A single `datasets(streaming=True)` connection (what `run_all_sources.py`
-  falls back to without `--raw-dir`) measured ~8 MB/s regardless of link
-  speed and occasionally 403/500'd from HF's Xet CDN under sustained load;
-  many concurrent connections measured ~61-66 MB/s aggregate on the same
-  repos (~7-8x). Resumable for free (`snapshot_download` skips files
-  already present and up to date).
-- `scripts/run_all_sources.py` — same Etapas 1-5 pipeline across all 18
-  available sources, now split into two phases for parallelism: a
-  **filter phase** (ingest -> language filter -> clean -> quality) that
-  runs one worker process per source at once via `--max-workers` (no
-  shared state, so this is where pre-downloading pays off -- a streamed
-  connection can't be split across processes, a local file can), then a
-  **dedup phase** that runs serially, with **per-language** exact + near
-  dedup shared across every source in a fixed order (as required by the
-  plan for cross-source overlap -- this can't be parallelized without
-  breaking that guarantee). Both phases stream kept docs to Parquet part
-  files in batches (`data/processed/{pt,es,hi}/<row>__part####.parquet`,
-  same final shape as before) instead of holding a whole run in memory,
-  and are independently resumable/checkpointed, so a crash/timeout only
-  costs redoing whatever source was in flight in that phase.
+  of one giant file per config. Unchanged by the datatrove rewrite --
+  fully schema-agnostic, just reads whatever's in `data/processed/{lang}/`.
 - `scripts/build_final_dataset.py` — Etapa 6: aggregates the per-language
   parts into the `pt`/`es`/`hi`/`all` config shape via `shuffle_into_shards`.
-  Unchanged by the above -- the two-phase split still ends in the same
-  output layout.
-- `scripts/slurm/` — SLURM scripts for a Naiss/SUPR run (download, full
-  filter+dedup, Etapa 6 aggregation, HF upload).
+- `scripts/slurm/` — SLURM scripts for a Naiss/SUPR run (download, dedup,
+  Etapa 6 aggregation, HF upload, plus the fineweb2/sangraha-scoped
+  tokenizer sweep/train jobs).
 
-**Blocked:** none currently -- `CulturaX` was the last blocked source (gated,
-needed an HF token with accepted terms) and is now accessible; it ingests
-as `{pt,es,hi}-culturax` via `GenericTextAdapter`'s remote-glob fallback
-(see above), bypassing its unsupported loading script the same way
-`corpus-carolina` does.
-
-Not yet implemented: `compute_stats.py` (Etapa 7's schema/language/dedup
-validation checklist -- `funnel_stats.json` from `run_all_sources.py`
-covers part of this already, but not the full checklist), and the actual
-HF Hub upload of a real (non-pilot-scale) corpus.
+**Deliberately out of scope, not "not yet implemented":** the other 15
+sources this pipeline used to support (EuroWeb-2512, CulturaX, HPLT,
+corpus-carolina, Portuguese-PD, corpus-ptbr-v2, fineweb2-bagaco2,
+Spanish-PD-Books/Newspapers) and all language/quality filtering -- both
+were removed, not left unfinished, when scope was narrowed to the 4
+sources above.
 
 ## Setup
 
@@ -108,36 +97,23 @@ uv sync
 ## Usage
 
 ```bash
-# Fase 0: inspect all 12 sources (size, schema, license) -> configs/sources.yaml
-uv run scripts/inspect_sources.py
-
-# smoke-test a single source without touching configs/sources.yaml
-uv run scripts/inspect_sources.py --only hi-euroweb
-
-# Fase 1: run the pilot pipeline (streams up to --limit docs)
-uv run scripts/run_pilot.py --limit 2000
-
-# Fase 2a (optional but recommended for a real run): bulk-download every
-# source's raw files first, with many concurrent connections -> data/raw/.
-# `datasets(streaming=True)` (what run_all_sources.py falls back to without
-# --raw-dir) is a single throttled connection per source -- measured ~8 MB/s
-# regardless of link speed, and occasionally 403/500s from HF's Xet CDN
-# under sustained load. snapshot_download instead measured ~61-66 MB/s
-# aggregate on the same repos (~7-8x). See scripts/download_sources.py.
+# 1. Bulk-download the 4 sources' raw files -> data/raw/. A single
+# `datasets(streaming=True)` connection is a single throttled connection
+# per source -- measured ~8 MB/s regardless of link speed, and occasionally
+# 403/500s from HF's Xet CDN under sustained load. snapshot_download
+# instead measured ~61-66 MB/s aggregate on the same repos (~7-8x).
 uv run scripts/download_sources.py
 
-# Fase 2: run all 18 available sources -> data/processed/{pt,es,hi}/*.parquet.
-# Two phases (see scripts/run_all_sources.py's docstring): a parallel
-# per-source filter phase (--max-workers, CPU-bound once files are local)
-# then a serial cross-source dedup phase (dedup state is intentionally
-# shared per language, to catch e.g. the same doc in both fineweb2 and
-# EuroWeb). Both phases are independently resumable/checkpointed.
-# --limit-per-source and --full are mutually exclusive and one is required
-# -- no silent default, since a real full run is a multi-TB pull (see
-# configs/sources.yaml). Pass --raw-dir to read Fase 2a's local download
-# instead of streaming from the Hub.
-uv run scripts/run_all_sources.py --limit-per-source 500
-# uv run scripts/run_all_sources.py --full --raw-dir data/raw   # real corpus -- see scripts/slurm/ for Naiss/SUPR
+# 2. Smoke-test the dedup pipeline locally on a tiny sample first --
+# LocalPipelineExecutor, no SLURM needed.
+uv run scripts/run_dedup_datatrove.py --executor local --limit 500 --tasks 2
+
+# 3. Real run, sharded across a SLURM job array (datatrove submits its own
+# sbatch jobs -- see scripts/slurm/01_dedup_datatrove.sh for a driver-job
+# wrapper). --tasks should scale with source size (es-fineweb2 alone is
+# ~441M docs).
+uv run scripts/run_dedup_datatrove.py --executor slurm --tasks 200 \
+    --account <your-naiss-account> --partition berzelius-cpu --time 24:00:00
 
 # Etapa 6: aggregate into the pt/es/hi/all config shape -> data/final/
 uv run scripts/build_final_dataset.py
@@ -222,27 +198,35 @@ It still trails Sarvam-1 and EuroLLM on hi -- consistent with the
 "hi is data-starved" finding above. Full numbers in
 `artifacts/tokenizer_sweep/baseline_comparison.csv`.
 
-## Known findings from the pilot (corpus-ptbr-v2, 2026-07-08)
+## Known findings (2026-07-17)
 
-These already fed back into `configs/filters.yaml` / `src/filters/quality.py`:
-
-- A naive "any non-word character" symbol-ratio rule drops ~97% of normal
-  prose (punctuation alone exceeds a 0.1 ratio). Narrowed to a curated set
-  of code/template noise characters.
-- `*` and `_` (markdown emphasis, snake_case identifiers) are not noise —
-  excluding them took the pilot's false-positive rate from ~52% to ~5%.
-- The plan's suggested `max_ngram_repetitions: 3` (4-grams) drops legitimate
-  long-form articles that repeat a topical phrase (e.g. "um poste de
-  energia" 7x in one article). Raised to 10.
-- `corpus-carolina`'s HF loading script is no longer supported by
-  `datasets`/`datasets-server` (`trust_remote_code` was removed for it
-  entirely). Its real structure turned out to be gzip-compressed TEI XML
-  (`corpus/{taxonomy}/**/*.xml.gz`, one `<TEI>` element per document) --
-  confirmed by inspecting the repo's raw file list and one shard, then
-  written as `CarolinaAdapter` (streaming download + gunzip + incremental
-  `xml.etree.ElementTree` parse, no full-file materialization).
-- `CulturaX` is gated (needs an HF token with accepted terms) -- this is
-  now the only source still blocked.
-- `Portuguese-PD`'s `/size` API returns 0 bytes/rows despite having real
-  data — its parquet index isn't computed on HF's side; don't trust that
-  field blindly, cross-check against the schema/sample response.
+- Measured hi-fineweb2/hi-sangraha overlap by hand (custom exact + MinHash
+  dedup, before this pipeline existed) at 500k docs/source: **~2%** of
+  hi-sangraha's docs were exact or near duplicates of hi-fineweb2 --
+  mostly exact matches (8,923 of 10,013 total), a modest but real overlap,
+  not the two sources being mostly redundant.
+- The old from-scratch pipeline (`src/filters/`, `src/dedup/`,
+  `scripts/run_all_sources.py`, all since removed) processed one source
+  with exactly one single-threaded worker regardless of available
+  cores/nodes -- measured ~30 docs/sec for fineweb2 and ~4.25 docs/sec for
+  hi-sangraha's OCR'd PDF text (slower per-doc processing cost), putting a
+  full run at ~46+ hours even with filtering skipped entirely. This is why
+  the pipeline was rebuilt around `datatrove`'s `SlurmPipelineExecutor`
+  instead of patching the old design -- see "Status" above.
+- datatrove's per-source-different-schema trap: `ParquetReader`'s default
+  `read_metadata=True` captures every extra column into a per-row
+  `metadata` struct; hi-fineweb2 and hi-sangraha have different extra
+  columns (fineweb-2: `dump`/`url`/`date`/...; sangraha: `type`), so
+  writing their combined output to one file crashed with a pyarrow schema
+  mismatch. Fixed at the row-count level, not globally: `build_readers`
+  only disables `read_metadata` for languages with more than one source
+  row (currently just hi) -- pt/es are single-source and keep their real
+  provenance columns in the final output.
+- datatrove's language-routed word tokenizers (used for MinHash shingling)
+  both pull in unexpectedly heavy dependencies: hi ("hin") routes to
+  `StanzaTokenizer("kmr")`, needing `stanza` and a full PyTorch/CUDA stack;
+  pt/es route to `SpaCyTokenizer`, needing `spacy` + a downloaded model.
+  Even datatrove's own `WhitespaceTokenizer` "fallback" secretly delegates
+  to spaCy's multilingual "xx" model. Replaced with a minimal custom
+  `WordTokenizer` subclass doing plain `str.split()` -- the same approach
+  the removed from-scratch dedup always used, with no extra dependencies.

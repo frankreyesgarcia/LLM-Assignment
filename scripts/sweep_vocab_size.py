@@ -43,8 +43,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.ingest.base import VALID_LANGUAGES
-from src.tokenizer.data import oversample_by_ratio, parse_lang_ratios, stratified_sample
+from src.sources import VALID_LANGUAGES
+from src.tokenizer.data import (
+    oversample_by_ratio,
+    parse_lang_ratios,
+    stratified_sample,
+    stratified_sample_processed,
+)
 from src.tokenizer.eval import per_language_report
 from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import train_tokenizer
@@ -72,11 +77,21 @@ def run_sweep(
     limit_docs: int | None,
     lang_ratios: dict[str, float] | None,
     out_dir: Path,
+    processed_dir: Path | None = None,
 ) -> list[dict]:
-    print(f"Streaming samples from {repo_id}/{config} (train<={train_mb}MB, heldout<={heldout_mb}MB)...")
-    buckets = stratified_sample(
-        repo_id, config, split, [("train", train_mb), ("heldout", heldout_mb)], limit_docs
-    )
+    if processed_dir is not None:
+        print(
+            f"Sampling from the deduped corpus under {processed_dir} "
+            f"(train<={train_mb}MB, heldout<={heldout_mb}MB per language)..."
+        )
+        buckets = stratified_sample_processed(
+            processed_dir, [("train", train_mb), ("heldout", heldout_mb)], limit_docs
+        )
+    else:
+        print(f"Streaming samples from {repo_id}/{config} (train<={train_mb}MB, heldout<={heldout_mb}MB)...")
+        buckets = stratified_sample(
+            repo_id, config, split, [("train", train_mb), ("heldout", heldout_mb)], limit_docs
+        )
     train_docs, heldout_docs = buckets["train"], buckets["heldout"]
     for lang in VALID_LANGUAGES:
         print(
@@ -201,6 +216,14 @@ if __name__ == "__main__":
         "src/tokenizer/data.py::oversample_by_ratio.",
     )
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer_sweep")
+    parser.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=None,
+        help="Sample from the deduped local corpus under this dir "
+        "(scripts/run_dedup_datatrove.py's --out-dir, {lang}/*.parquet) instead of streaming "
+        "--repo-id from the Hub.",
+    )
     args = parser.parse_args()
 
     vocab_sizes = [int(v) for v in args.vocab_sizes.split(",")]
@@ -218,6 +241,7 @@ if __name__ == "__main__":
             limit_docs=args.limit_docs,
             lang_ratios=lang_ratios,
             out_dir=args.out_dir,
+            processed_dir=args.processed_dir,
         )
 
     # See scripts/run_pilot.py for why: `datasets` streaming leaves

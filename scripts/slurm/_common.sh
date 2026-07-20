@@ -4,19 +4,19 @@
 # Fill in the two placeholders below before submitting anything:
 #   PROJECT_ACCOUNT  -- your Naiss/SUPR compute allocation (sbatch -A)
 #   PROJECT_STORAGE  -- persistent project storage (/proj/<your-project>/...),
-#                       NOT node-local $TMPDIR. run_all_sources.py's
-#                       resumability (checkpoint.json + Parquet parts +
-#                       near_dedup_*.sqlite3) depends on --out-dir surviving
-#                       across separate job submissions (e.g. after a
-#                       requeue on timeout) -- $TMPDIR is wiped per-job on
-#                       most Naiss clusters and would silently break that.
+#                       NOT node-local $TMPDIR. scripts/run_dedup_datatrove.py's
+#                       intermediate signatures/buckets/clusters (--work-dir)
+#                       and final deduped output (--out-dir) both need to
+#                       survive across separate job submissions -- $TMPDIR is
+#                       wiped per-job on most Naiss clusters and would
+#                       silently break a multi-stage/resumed run.
 export PROJECT_ACCOUNT="${PROJECT_ACCOUNT:?set PROJECT_ACCOUNT to your Naiss allocation, e.g. naiss2026-x-y}"
 export PROJECT_STORAGE="${PROJECT_STORAGE:?set PROJECT_STORAGE to persistent project storage, e.g. /proj/your-project/llm-und}"
 
 # huggingface_hub/datasets default to caching downloads under ~/.cache/huggingface,
 # i.e. $HOME -- which on Berzelius has only a 20GB quota (see scripts/slurm/README.md)
-# and would fill up almost immediately given the multi-TB sources in
-# configs/sources.yaml. Redirect every HF cache location into project storage
+# and would fill up almost immediately given the size of these sources (see
+# src/sources.py). Redirect every HF cache location into project storage
 # instead. HF_HOME alone would cover this (HF_HUB_CACHE/HF_DATASETS_CACHE both
 # default to under it), but setting all three explicitly avoids relying on
 # that fallback across library versions.
