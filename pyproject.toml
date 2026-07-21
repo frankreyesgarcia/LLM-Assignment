@@ -18,6 +18,8 @@ dependencies = [
     "jinja2>=3.1",
     "kneed>=0.8.6",
     "datatrove>=0.8.0",
+    "torch>=2.13.0",
+    "scipy>=1.13",
 ]
 
 [dependency-groups]
