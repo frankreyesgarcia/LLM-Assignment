@@ -53,6 +53,7 @@ def generate_text(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ckpt", type=Path, default=REPO_ROOT / "runs" / "train" / "ckpt.pt")
+    # AutoTokenizer.from_pretrained("andre15silva/pt-es-hi-tokenizer").save_pretrained("artifacts/tokenizer")
     parser.add_argument("--tokenizer-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer")
     parser.add_argument("--prompt", default=None, help="If omitted, drops into an interactive prompt loop")
     parser.add_argument("--max-new-tokens", type=int, default=60)
