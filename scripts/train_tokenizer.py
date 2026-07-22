@@ -18,7 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.tokenizer.data import stratified_sample
+from src.sources import VALID_LANGUAGES
+from src.tokenizer.data import iter_texts_from_parquet_files, stratified_sample, stratified_sample_processed
 from src.tokenizer.eval import per_language_report
 from src.tokenizer.logging_utils import tee_to_log
 from src.tokenizer.train import save_pretrained, train_tokenizer
@@ -38,6 +39,18 @@ def iter_texts(repo_id: str, config: str, split: str, limit_docs: int | None):
             yield text
 
 
+def iter_texts_processed(processed_dir: Path, limit_docs_per_lang: int | None):
+    """Same shape as `iter_texts`, but reads the already-deduped local
+    corpus at `processed_dir/{lang}/*.parquet` (scripts/run_dedup_datatrove.py's
+    output) instead of streaming a HF dataset (see `--processed-dir`)."""
+    for lang in sorted(VALID_LANGUAGES):
+        lang_dir = processed_dir / lang
+        files = sorted(lang_dir.glob("*.parquet"))
+        if not files:
+            raise ValueError(f"No parquet files found under {lang_dir}")
+        yield from iter_texts_from_parquet_files(files, limit_docs_per_lang)
+
+
 def run(
     repo_id: str,
     config: str,
@@ -46,14 +59,25 @@ def run(
     limit_docs: int | None,
     eval_sample_mb: float,
     out_dir: Path,
+    processed_dir: Path | None = None,
 ) -> None:
-    print(f"Training vocab_size={vocab_size:,} on {repo_id}/{config} (limit_docs={limit_docs})...")
-    tokenizer = train_tokenizer(iter_texts(repo_id, config, split, limit_docs), vocab_size=vocab_size)
+    if processed_dir is not None:
+        print(
+            f"Training vocab_size={vocab_size:,} on the deduped corpus under {processed_dir} "
+            f"(limit_docs_per_lang={limit_docs})..."
+        )
+        tokenizer = train_tokenizer(iter_texts_processed(processed_dir, limit_docs), vocab_size=vocab_size)
+    else:
+        print(f"Training vocab_size={vocab_size:,} on {repo_id}/{config} (limit_docs={limit_docs})...")
+        tokenizer = train_tokenizer(iter_texts(repo_id, config, split, limit_docs), vocab_size=vocab_size)
     fast_tokenizer = save_pretrained(tokenizer, out_dir)
     print(f"Saved tokenizer to {out_dir} (vocab_size={len(fast_tokenizer):,})")
 
     print(f"Re-streaming a {eval_sample_mb}MB sample per language for a quality snapshot...")
-    buckets = stratified_sample(repo_id, config, split, [("eval", eval_sample_mb)])
+    if processed_dir is not None:
+        buckets = stratified_sample_processed(processed_dir, [("eval", eval_sample_mb)])
+    else:
+        buckets = stratified_sample(repo_id, config, split, [("eval", eval_sample_mb)])
     report = per_language_report(fast_tokenizer, buckets["eval"])
     print()
     print(f"{'lang':>8} {'fertility':>10} {'compression':>12}")
@@ -70,6 +94,14 @@ if __name__ == "__main__":
     parser.add_argument("--limit-docs", type=int, default=None, help="Debug cap on docs streamed for training")
     parser.add_argument("--eval-sample-mb", type=float, default=5.0)
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "tokenizer")
+    parser.add_argument(
+        "--processed-dir",
+        type=Path,
+        default=None,
+        help="Train on the deduped local corpus under this dir "
+        "(scripts/run_dedup_datatrove.py's --out-dir, {lang}/*.parquet) instead of streaming "
+        "--repo-id from the Hub. With this set, --limit-docs caps docs *per language* rather than total.",
+    )
     args = parser.parse_args()
 
     with tee_to_log(args.out_dir, "train_tokenizer"):
@@ -81,6 +113,7 @@ if __name__ == "__main__":
             limit_docs=args.limit_docs,
             eval_sample_mb=args.eval_sample_mb,
             out_dir=args.out_dir,
+            processed_dir=args.processed_dir,
         )
 
     # See scripts/run_pilot.py for why: `datasets` streaming leaves

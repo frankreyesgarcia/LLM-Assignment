@@ -9,8 +9,9 @@ tokenizer was trained on.
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 
-from src.ingest.base import VALID_LANGUAGES
+from src.sources import VALID_LANGUAGES
 
 
 def parse_lang_ratios(spec: str) -> dict[str, float]:
@@ -132,5 +133,67 @@ def stratified_sample(
 
         docs[target][lang].append(text)
         bytes_so_far[target][lang] += nbytes
+
+    return {name: dict(d) for name, d in docs.items()}
+
+
+def iter_texts_from_parquet_files(files: list[Path], limit_docs: int | None = None):
+    """Lazily yield the `text` column from a list of parquet files, in
+    order, stopping once `limit_docs` non-empty texts have been yielded
+    (no cap if `limit_docs` is None). Shared by `stratified_sample_processed`
+    (bucketed sampling below) and `scripts/train_tokenizer.py`'s
+    `iter_texts_processed` (flat streaming for BPE training) -- both read
+    local `scripts/run_dedup_datatrove.py` output the same way, so the
+    glob/batch-iteration logic lives in exactly one place.
+    """
+    import pyarrow.parquet as pq
+
+    n = 0
+    for file in files:
+        if limit_docs is not None and n >= limit_docs:
+            return
+        parquet_file = pq.ParquetFile(file)
+        for batch in parquet_file.iter_batches(columns=["text"], batch_size=1000):
+            for text in batch.column("text").to_pylist():
+                if limit_docs is not None and n >= limit_docs:
+                    return
+                n += 1
+                if text:
+                    yield text
+
+
+def stratified_sample_processed(
+    processed_dir: Path,
+    buckets: list[tuple[str, float]],
+    limit_docs_per_lang: int | None = None,
+) -> dict[str, dict[str, list[str]]]:
+    """Like `stratified_sample`, but reads the already-deduped local corpus
+    at `processed_dir/{lang}/*.parquet` (scripts/run_dedup_datatrove.py's
+    output) instead of streaming a HF dataset -- same proportional
+    bucket-filling logic, just over `pyarrow.parquet` batches per language
+    instead of one combined `load_dataset` stream with a `language` column.
+
+    No per-source row-splitting is needed here (unlike the pre-dedup raw
+    downloads, where hi pulled from two separate physical directories):
+    the datatrove pipeline already merges and dedups each language's
+    sources into one flat directory, so this just reads it directly.
+    """
+    caps = {name: mb * 1_000_000 / len(VALID_LANGUAGES) for name, mb in buckets}
+    bytes_so_far: dict[str, dict[str, int]] = {name: defaultdict(int) for name, _ in buckets}
+    docs: dict[str, dict[str, list[str]]] = {name: defaultdict(list) for name, _ in buckets}
+
+    for lang in VALID_LANGUAGES:
+        lang_dir = processed_dir / lang
+        files = sorted(lang_dir.glob("*.parquet"))
+        if not files:
+            raise ValueError(f"No parquet files found under {lang_dir}")
+
+        for text in iter_texts_from_parquet_files(files, limit_docs_per_lang):
+            candidates = [name for name, _ in buckets if bytes_so_far[name][lang] < caps[name]]
+            if not candidates:
+                break
+            target = min(candidates, key=lambda name: bytes_so_far[name][lang] / caps[name])
+            docs[target][lang].append(text)
+            bytes_so_far[target][lang] += len(text.encode("utf-8"))
 
     return {name: dict(d) for name, d in docs.items()}

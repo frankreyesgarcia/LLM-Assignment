@@ -1,0 +1,15 @@
+# MinhashConfig fields for scripts/run_dedup_datatrove.py (datatrove's
+# datatrove.pipeline.dedup.minhash.MinhashConfig). Starting from datatrove's
+# own documented defaults rather than hand-translating the old
+# datasketch-based config (128 permutations / 0.85 Jaccard threshold) --
+# that parameterization doesn't map onto num_buckets/hashes_per_bucket
+# directly. Per datatrove's own source comments: num_buckets=14,
+# hashes_per_bucket=8 targets a similarity threshold of
+# (1/14)^(1/8) ~= 0.72, with a 92.4% inclusion probability at a real
+# similarity of 0.8. Revisit once the pipeline has run for real and we can
+# compare its overlap numbers against the ~2% hi-fineweb2/hi-sangraha
+# overlap already measured by hand.
+n_grams: 5
+num_buckets: 14
+hashes_per_bucket: 8
+seed: 1
