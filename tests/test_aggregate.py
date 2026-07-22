@@ -149,6 +149,93 @@ def test_shuffle_into_shards_deterministic_for_same_seed(tmp_path):
     assert _read_all_texts(out_a) == _read_all_texts(out_b)
 
 
+def test_shuffle_into_shards_columns_projects_and_tolerates_schema_mismatch(tmp_path):
+    # Mirrors the real pt/hi situation: two input dirs whose non-projected
+    # columns disagree in type (string vs. struct) -- combining them without
+    # `columns=` would hit a schema mismatch; projecting down to the shared
+    # columns should work regardless, and the output shouldn't carry the
+    # dropped column at all.
+    pt_schema = pa.schema([("text", pa.string()), ("id", pa.string()), ("metadata", pa.string())])
+    hi_schema = pa.schema(
+        [("text", pa.string()), ("id", pa.string()), ("metadata", pa.struct([("file_path", pa.string())]))]
+    )
+    pt_dir = tmp_path / "in" / "pt"
+    hi_dir = tmp_path / "in" / "hi"
+    pt_dir.mkdir(parents=True)
+    hi_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [{"text": f"pt-{i}", "id": f"pt-{i}", "metadata": "{}"} for i in range(20)], schema=pt_schema
+        ),
+        pt_dir / "part0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [{"text": f"hi-{i}", "id": f"hi-{i}", "metadata": {"file_path": "x"}} for i in range(15)],
+            schema=hi_schema,
+        ),
+        hi_dir / "part0.parquet",
+    )
+
+    out_dir = tmp_path / "out" / "all"
+    n = shuffle_into_shards([pt_dir, hi_dir], out_dir, seed=5, columns=["text", "id"])
+
+    assert n == 35
+    shard = pq.read_table(sorted(out_dir.glob("*.parquet"))[0])
+    assert shard.column_names == ["text", "id"]
+    texts = shard.column("text").to_pylist()
+    assert sorted(t for t in texts if t.startswith("pt-")) == sorted(f"pt-{i}" for i in range(20))
+    assert sorted(t for t in texts if t.startswith("hi-")) == sorted(f"hi-{i}" for i in range(15))
+
+
+def test_shuffle_into_shards_two_level_preserves_all_rows_no_loss_or_duplication(tmp_path):
+    # Force the two-level coarse/fine path (see shuffle_into_shards's
+    # docstring): num_shards > max_concurrent_writers. This is the path
+    # that keeps concurrently-open ParquetWriters bounded regardless of
+    # corpus size -- confirmed necessary at real scale (es's 1158 shards
+    # OOM'd at both 600G and 900G with the old flat design, which opened
+    # all num_shards writers at once).
+    part_dir = tmp_path / "in" / "pt"
+    part_dir.mkdir(parents=True)
+    _write_part(part_dir / "part0.parquet", 2000)
+    total_bytes = (part_dir / "part0.parquet").stat().st_size
+
+    out_dir = tmp_path / "out" / "pt"
+    n = shuffle_into_shards(
+        [part_dir],
+        out_dir,
+        seed=1,
+        target_shard_bytes=max(1, total_bytes // 20),  # ~20 shards
+        max_concurrent_writers=3,  # force num_shards (~20) > cap (3)
+    )
+
+    assert n == 2000
+    shards = sorted(out_dir.glob("*.parquet"))
+    assert len(shards) > 3  # confirms the two-level path actually engaged
+    expected_names = {f"train-{i:05d}-of-{len(shards):05d}.parquet" for i in range(len(shards))}
+    assert {p.name for p in shards} == expected_names
+    texts = _read_all_texts(out_dir)
+    assert sorted(texts) == sorted(f"doc-{i}" for i in range(2000))
+    assert len(texts) == len(set(texts))
+    # No leftover intermediate state.
+    assert not (out_dir / ".work").exists()
+
+
+def test_shuffle_into_shards_two_level_deterministic_for_same_seed(tmp_path):
+    part_dir = tmp_path / "in" / "pt"
+    part_dir.mkdir(parents=True)
+    _write_part(part_dir / "part0.parquet", 500)
+    total_bytes = (part_dir / "part0.parquet").stat().st_size
+
+    out_a = tmp_path / "out_a"
+    out_b = tmp_path / "out_b"
+    kwargs = dict(seed=99, target_shard_bytes=max(1, total_bytes // 10), max_concurrent_writers=3)
+    shuffle_into_shards([part_dir], out_a, **kwargs)
+    shuffle_into_shards([part_dir], out_b, **kwargs)
+
+    assert _read_all_texts(out_a) == _read_all_texts(out_b)
+
+
 def test_shuffle_into_shards_combines_multiple_input_dirs(tmp_path):
     pt_dir = tmp_path / "in" / "pt"
     es_dir = tmp_path / "in" / "es"
