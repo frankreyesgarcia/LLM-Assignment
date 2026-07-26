@@ -5,8 +5,9 @@
 #
 # Unlike scripts/prepare_pretrain_data.py (loads a whole split into one
 # Python list -- fine for the few-thousand-doc pilot dataset, not for this
-# corpus), this streams parquet shards and does a two-pass tokenize
-# (count, then write) so nothing needs the full corpus in RAM.
+# corpus), this streams parquet shards and tokenizes in a single pass
+# straight to disk (see tokenize_and_write) so nothing needs the full
+# corpus in RAM.
 #
 # andre15silva/pretrain-pt-es-hi is itself a copy of this repo's own
 # scripts/build_final_dataset.py output (same shard layout/sizes) -- if
@@ -15,12 +16,28 @@
 # all. Otherwise it falls back to snapshot_download (resumable, see
 # scripts/download_sources.py) into $PROJECT_STORAGE/data/pretrain_source.
 #
-# --time/--mem are rough placeholders, not calibrated against a real run
-# (no cluster access yet -- see scripts/slurm/02_build_final.sh for how
-# the other stages' numbers were derived from actual timed jobs). Treat
-# this the same way once you can dry-run on a small --languages subset:
-# time it, then size --time/--mem off that instead of trusting this
-# comment.
+# --cpus-per-task=128 / --time=24:00:00: a real timed test against just the
+# hi language (75GB of the 1.3TB total, the smallest of the three) at the
+# previous --cpus-per-task=16 and the old two-pass tokenizer measured
+# ~1.9 min/shard for the count pass alone (100 train shards), extrapolating
+# to ~107h for the full pt/es/hi corpus -- past this cluster's 3-day
+# (72h) partition time limit, so that config could never actually finish.
+# Fixed two ways: (1) tokenize_and_write is now single-pass (see its
+# docstring), roughly halving the tokenization work; (2) --cpus-per-task
+# raised from 16 to 128 -- `sinfo -p berzelius-cpu -N` showed several
+# nodes fully idle (128/128 CPUs, 1126GB RAM free) at the time this was
+# written, so 16 was using only an eighth of a node's cores for a
+# CPU-bound job; requesting the full node lets tokenizers' Rust backend
+# use all of it (a single process/node -- SLURM doesn't parallelize one
+# job across multiple nodes, so this is the ceiling per job as written).
+# Combined (~2x from single-pass, up to ~8x from cores, realistically
+# less than perfectly linear), this should land well under 72h, but
+# neither number has been re-verified against an actual timed run at this
+# cpus-per-task/single-pass combination -- if you can, re-run the hi-only
+# timing test (--languages hi) at these settings before fully trusting
+# --time here. Using the full node also means it's the exclusive occupant
+# until this finishes -- fine given multiple nodes were idle, but worth
+# checking that's still true at submission time.
 #
 # Chain before the training job:
 #   JOB1=$(sbatch --parsable scripts/slurm/06_prepare_pretrain_full.sh)
@@ -31,9 +48,9 @@
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
 #SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16           # tokenizers' Rust backend parallelizes batch_encode_plus internally
-#SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=128          # tokenizers' Rust backend parallelizes batch_encode_plus internally -- see comment above
+#SBATCH --mem=96G
+#SBATCH --time=24:00:00              # see comment above -- estimate, not re-verified at this cpus-per-task/single-pass combination
 #SBATCH --output=runs/%j-06_prepare_pretrain.out
 #SBATCH --error=runs/%j-06_prepare_pretrain.err
 
