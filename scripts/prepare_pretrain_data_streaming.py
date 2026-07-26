@@ -20,9 +20,11 @@ Two differences from prepare_pretrain_data.py:
    already globally shuffles documents across shards before writing them
    (see its docstring), so reserving whole shards for val is equivalent to
    a random per-doc split without needing the full corpus in RAM.
-   Tokenization is two-pass per split (count tokens, then allocate the
-   memmap and write) -- the same shape nanoGPT's own data-prep scripts
-   use, since the total token count isn't known until it's tokenized.
+   Tokenization is single-pass per split, appending straight to a plain
+   binary file as each batch is tokenized (see tokenize_and_write) --
+   unlike nanoGPT's own data-prep scripts, this never preallocates a
+   fixed-size memmap, so it doesn't need a separate first pass just to
+   count the total token number before writing.
 """
 
 from __future__ import annotations
@@ -91,46 +93,42 @@ def iter_texts(shards: list[Path], batch_rows: int):
                     yield text
 
 
-def count_tokens(shards: list[Path], tokenizer, batch_rows: int) -> tuple[int, int]:
+def tokenize_and_write(
+    shards: list[Path], tokenizer, eos_id: int, batch_rows: int, out_path: Path
+) -> tuple[int, int]:
+    """Tokenize every doc in `shards` exactly once, appending straight to
+    `out_path` as it goes.
+
+    Writing to a plain append-mode file (instead of a np.memmap
+    preallocated to the final size) means the total token count never
+    needs to be known up front, so there's no separate counting pass --
+    each doc gets tokenized once, not twice. train.py's load_data() reads
+    this back as `np.memmap(path, dtype=np.uint16, mode="r")`, which
+    infers its length from the file size, so no shape/count needs to be
+    recorded here for reading -- only for the meta.json stats below.
+    """
     n_docs, n_tokens = 0, 0
     texts: list[str] = []
-    for text in iter_texts(shards, batch_rows):
-        texts.append(text)
-        if len(texts) >= batch_rows:
+
+    with open(out_path, "wb") as f:
+
+        def flush() -> None:
+            nonlocal n_docs, n_tokens
             for ids in tokenizer(texts, add_special_tokens=False)["input_ids"]:
+                doc = np.array([*ids, eos_id], dtype=np.uint16)
+                f.write(doc.tobytes())
                 n_docs += 1
-                n_tokens += len(ids) + 1  # +1 for the EOS separator
+                n_tokens += doc.shape[0]
             texts.clear()
-    if texts:
-        for ids in tokenizer(texts, add_special_tokens=False)["input_ids"]:
-            n_docs += 1
-            n_tokens += len(ids) + 1
-        texts.clear()
-    return n_docs, n_tokens
 
-
-def write_tokens(shards: list[Path], tokenizer, eos_id: int, batch_rows: int, out_path: Path, n_tokens: int) -> None:
-    arr = np.memmap(out_path, dtype=np.uint16, mode="w+", shape=(n_tokens,))
-    pos = 0
-    texts: list[str] = []
-
-    def flush() -> None:
-        nonlocal pos
-        for ids in tokenizer(texts, add_special_tokens=False)["input_ids"]:
-            n = len(ids)
-            arr[pos : pos + n] = ids
-            arr[pos + n] = eos_id
-            pos += n + 1
-        texts.clear()
-
-    for text in iter_texts(shards, batch_rows):
-        texts.append(text)
-        if len(texts) >= batch_rows:
+        for text in iter_texts(shards, batch_rows):
+            texts.append(text)
+            if len(texts) >= batch_rows:
+                flush()
+        if texts:
             flush()
-    if texts:
-        flush()
-    assert pos == n_tokens, f"token count drifted between passes ({pos} written vs {n_tokens} counted)"
-    arr.flush()
+
+    return n_docs, n_tokens
 
 
 def run(
@@ -164,10 +162,9 @@ def run(
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = {"vocab_size": tokenizer.vocab_size, "tokenizer_dir": str(tokenizer_dir), "eos_token_id": eos_id}
     for split_name, shards in [("train", train_shards), ("val", val_shards)]:
-        print(f"Counting {split_name} tokens across {len(shards)} shards...")
-        n_docs, n_tokens = count_tokens(shards, tokenizer, batch_rows)
-        print(f"{split_name}: {n_docs:,} docs, {n_tokens:,} tokens -- writing {out_dir / f'{split_name}.bin'}")
-        write_tokens(shards, tokenizer, eos_id, batch_rows, out_dir / f"{split_name}.bin", n_tokens)
+        print(f"Tokenizing {split_name} split across {len(shards)} shards...")
+        n_docs, n_tokens = tokenize_and_write(shards, tokenizer, eos_id, batch_rows, out_dir / f"{split_name}.bin")
+        print(f"{split_name}: {n_docs:,} docs, {n_tokens:,} tokens -- wrote {out_dir / f'{split_name}.bin'}")
         meta[f"{split_name}_docs"] = n_docs
         meta[f"{split_name}_tokens"] = n_tokens
 
