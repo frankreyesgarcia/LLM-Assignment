@@ -10,13 +10,26 @@
 # fit (see scripts/fit_scaling_law.py if you want to redo this properly
 # against a stated compute budget instead).
 #
-# max_iters=40000 at batch_size=64 * block_size=1024 = ~2.6B tokens seen --
+# batch_size=8 (not the more standard 64): a 100-iter dry run at
+# batch_size=64 OOM'd during the training forward/backward pass -- the
+# lm_head logits tensor alone is (batch, block_size, vocab_size) =
+# (64, 1024, 32000) fp32 = ~8.4GB, and with no mixed precision (see KNOWN
+# GAP below) several such buffers must coexist for backprop, which
+# exceeded this GPU's 40GB. batch_size=8 fits comfortably, but does mean
+# a noisier gradient per step than batch_size=64 would give; if that
+# matters, prefer adding gradient accumulation instead (see KNOWN GAP
+# below) so per-step memory stays low while the effective batch size seen
+# by the optimizer stays at 64.
+#
+# max_iters=320000 at batch_size=8 * block_size=1024 = ~2.6B tokens seen --
 # deliberately far short of one epoch over the full corpus (a byte-level
 # 32k-vocab tokenizer over 1.3TB of text is on the order of 300B+ tokens;
 # one epoch over that for a 124M model is ~100x past the Chinchilla
-# compute-optimal ratio of ~20 tokens/param). Raise --max-iters if you want
-# a longer/more over-trained run; this default targets roughly
-# compute-optimal for this model size instead of "as much data as exists".
+# compute-optimal ratio of ~20 tokens/param). max_iters/warmup_iters/
+# eval_interval below are scaled by the same 8x as batch_size shrank by,
+# so the total token budget and warmup/eval-interval *fractions* of the
+# run match what they were at batch_size=64 -- only the per-step batch
+# shrank, not the intended amount of training.
 #
 # KNOWN GAP: src/model/train.py has no gradient accumulation, no mixed
 # precision (fp32 throughout despite GPT using
@@ -65,15 +78,15 @@ uv run scripts/train.py \
     --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
     --out-dir "$PROJECT_STORAGE/runs/pretrain_full" \
     --block-size 1024 \
-    --batch-size 64 \
+    --batch-size 8 \
     --n-layer 12 \
     --n-head 12 \
     --n-embd 768 \
-    --max-iters 40000 \
+    --max-iters 320000 \
     --lr 3e-4 \
     --min-lr 3e-5 \
-    --warmup-iters 1000 \
-    --eval-interval 500 \
+    --warmup-iters 8000 \
+    --eval-interval 4000 \
     --eval-iters 50 \
     --device auto \
     2>&1 | tee "$LOG_DIR/pretrain.log"
