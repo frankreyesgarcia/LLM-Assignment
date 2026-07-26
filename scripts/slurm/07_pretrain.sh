@@ -21,15 +21,17 @@
 # below) so per-step memory stays low while the effective batch size seen
 # by the optimizer stays at 64.
 #
-# max_iters=320000 at batch_size=8 * block_size=1024 = ~2.6B tokens seen --
-# deliberately far short of one epoch over the full corpus (a byte-level
-# 32k-vocab tokenizer over 1.3TB of text is on the order of 300B+ tokens;
-# one epoch over that for a 124M model is ~100x past the Chinchilla
-# compute-optimal ratio of ~20 tokens/param). max_iters/warmup_iters/
-# eval_interval below are scaled by the same 8x as batch_size shrank by,
-# so the total token budget and warmup/eval-interval *fractions* of the
-# run match what they were at batch_size=64 -- only the per-step batch
-# shrank, not the intended amount of training.
+# max_iters=60000 at batch_size=8 * block_size=1024 = ~492M tokens seen,
+# targeting a ~12h wall-clock budget: that same dry run measured
+# ~14,300 tokens/sec on this GPU, so 60000 * 8 * 1024 / 14300 ~= 34,400s
+# ~= 9.6h, leaving buffer under --time below. This is a deliberately
+# reduced token budget (the original sizing -- 320000 iters, ~2.6B tokens,
+# picked to roughly match Chinchilla's ~20-tokens/param ratio for this
+# 124M model -- would take ~51h at this throughput). Raise --max-iters
+# (and --time proportionally) for a longer/less-undertrained run once
+# there's a bigger time budget available; rescale --warmup-iters/
+# --eval-interval with it to keep the same ~2.5%/1.25%-of-max_iters
+# fractions used here.
 #
 # KNOWN GAP: src/model/train.py has no gradient accumulation, no mixed
 # precision (fp32 throughout despite GPT using
@@ -48,11 +50,11 @@
 # docs once you have an account, and adjust --partition/--gpus/--time
 # below accordingly.
 #
-# --time is an unverified placeholder (no cluster access to calibrate
-# against, unlike the CPU-stage numbers elsewhere in this directory which
-# were timed on real runs -- see scripts/slurm/02_build_final.sh). Do a
-# short dry run first (--max-iters 100) and extrapolate from its
-# tokens/sec before trusting this for a real submission.
+# --time=12:00:00 is sized off the ~9.6h estimate above (see max_iters
+# comment) plus buffer -- unlike the CPU-stage numbers elsewhere in this
+# directory (timed on real runs, see scripts/slurm/02_build_final.sh),
+# this is extrapolated from a short 100-iter dry run, not a full timed
+# run, so treat it as approximate.
 #
 # Usage: sbatch scripts/slurm/07_pretrain.sh
 #SBATCH --job-name=llm-und-pretrain
@@ -62,7 +64,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00              # unverified placeholder -- calibrate from a short dry run
+#SBATCH --time=12:00:00              # sized off measured dry-run throughput, see comment above
 #SBATCH --output=runs/%j-07_pretrain.out
 #SBATCH --error=runs/%j-07_pretrain.err
 
@@ -82,11 +84,11 @@ uv run scripts/train.py \
     --n-layer 12 \
     --n-head 12 \
     --n-embd 768 \
-    --max-iters 320000 \
+    --max-iters 60000 \
     --lr 3e-4 \
     --min-lr 3e-5 \
-    --warmup-iters 8000 \
-    --eval-interval 4000 \
+    --warmup-iters 1500 \
+    --eval-interval 750 \
     --eval-iters 50 \
     --device auto \
     2>&1 | tee "$LOG_DIR/pretrain.log"
