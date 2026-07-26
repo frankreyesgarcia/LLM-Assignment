@@ -45,14 +45,16 @@ set -euo pipefail
 # use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
-# --project-final-dir already lives at
-# /proj/assert-berzelius/users/x_andaf/llm-und/data/final -- set
-# PROJECT_STORAGE accordingly so this resolves without touching HF
+# --project-final-dir/--tokenizer-dir point at x_andaf's project directory
+# (world-readable, this job only reads from it) rather than $PROJECT_STORAGE
+# -- $PROJECT_STORAGE is your own writable project directory, which is
+# where --local-dir/--out-dir below actually write output.
+SOURCE_STORAGE=/proj/assert-berzelius/users/x_andaf/llm-und
 uv run scripts/prepare_pretrain_data_streaming.py \
     --repo-id andre15silva/pretrain-pt-es-hi \
-    --project-final-dir "$PROJECT_STORAGE/data/final" \
+    --project-final-dir "$SOURCE_STORAGE/data/final" \
     --local-dir "$PROJECT_STORAGE/data/pretrain_source" \
-    --tokenizer-dir "$PROJECT_STORAGE/artifacts/tokenizer" \
+    --tokenizer-dir "$SOURCE_STORAGE/artifacts/tokenizer" \
     --out-dir "$PROJECT_STORAGE/data/pretrain_full" \
     --val-shards-per-lang 2 \
     2>&1 | tee "$LOG_DIR/prepare_pretrain_full.log"
