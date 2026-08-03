@@ -1,37 +1,57 @@
 #!/bin/bash
 # Task 3 -- pretrain a real (not toy-config) GPT on the tokenized full
 # corpus from scripts/slurm/06_prepare_pretrain_full.sh, via scripts/train.py
-# (thin CLI over src/model/train.py::train_model -- same code path as the
-# scaling-law sweeps, just pointed at real data/model sizes instead of the
-# tiny debug defaults).
+# (thin CLI over src/model/train.py::train_model).
 #
-# Model size: 12 layer / 12 head / 768 dim, block_size 1024 -- a GPT-2-small
-# equivalent (~124M params), picked directly rather than from a scaling-law
-# fit (see scripts/fit_scaling_law.py if you want to redo this properly
-# against a stated compute budget instead).
+# --flops-budget sizes both the model and the token count from a stated
+# compute budget instead of picking them by hand: it applies the Kaplan et
+# al. (2020) compute-optimal allocation (src/model/scaling.py, Eq 6.1/6.7)
+# to derive n_layer/n_head/n_embd (targeting N_opt non-embedding params)
+# and max_iters (targeting D_opt tokens), then --n-layer/--n-head/--n-embd/
+# --max-iters are ignored. This replaces an earlier version of this script
+# that hand-picked a 12-layer/768-dim (~124M param) shape and a wall-clock-
+# fitted max_iters (60000, ~492M tokens) -- both now fall out of the budget
+# below instead of being guessed.
 #
-# batch_size=8 (not the more standard 64): a 100-iter dry run at
-# batch_size=64 OOM'd during the training forward/backward pass -- the
-# lm_head logits tensor alone is (batch, block_size, vocab_size) =
-# (64, 1024, 32000) fp32 = ~8.4GB, and with no mixed precision (see KNOWN
-# GAP below) several such buffers must coexist for backprop, which
-# exceeded this GPU's 40GB. batch_size=8 fits comfortably, but does mean
-# a noisier gradient per step than batch_size=64 would give; if that
-# matters, prefer adding gradient accumulation instead (see KNOWN GAP
-# below) so per-step memory stays low while the effective batch size seen
-# by the optimizer stays at 64.
+# 1e17 FLOPs was picked to land in roughly a ~5h wall-clock window, using a
+# real dry run's measured throughput as the conversion factor: 819,200
+# tokens in 22.6s (36,248 tokens/sec) on a 25,220,096-non-embedding-param
+# config (n_layer=8, n_head=8, n_embd=512, batch_size=8, block_size=1024)
+# translates to an *achieved* compute rate of 6 * 25,220,096 * 36,248 ~=
+# 5.485 TFLOP/s (see also: this is ~28% of an A100-SXM4-80GB's 19.5
+# TFLOP/s fp32 peak, unsurprising since src/model/train.py has no mixed
+# precision -- see KNOWN GAP below). 1e17 FLOPs / 5.485 TFLOP/s ~= 18,232s
+# ~= 5.06h. Recompute this conversion factor from your own dry run before
+# trusting it on different hardware -- e.g.
+#   uv run scripts/train.py --data-dir ... --out-dir ... --max-iters 100 \
+#       --n-layer 8 --n-head 8 --n-embd 512 --batch-size 8 --block-size 1024
+# then achieved_flops_per_sec = 6 * n_params_non_embed * measured_tokens_per_sec,
+# and --flops-budget = achieved_flops_per_sec * (desired wall-clock seconds).
+# At 1e17 FLOPs this currently resolves to N_opt~=9.34M non-embedding params
+# (n_layer=6, n_head=6, n_embd=384) and D_opt~=6.90B tokens (max_iters
+# ~=841,737 at batch_size=8 * block_size=1024) -- verify with:
+#   uv run scripts/plan_compute_budget.py --flops-budget 1e17 \
+#       --batch-size 8 --block-size 1024
+# Raise --flops-budget (and --time proportionally, using the same
+# TFLOP/s conversion factor) for a bigger run once there's a larger time
+# budget available.
 #
-# max_iters=60000 at batch_size=8 * block_size=1024 = ~492M tokens seen,
-# targeting a ~12h wall-clock budget: that same dry run measured
-# ~14,300 tokens/sec on this GPU, so 60000 * 8 * 1024 / 14300 ~= 34,400s
-# ~= 9.6h, leaving buffer under --time below. This is a deliberately
-# reduced token budget (the original sizing -- 320000 iters, ~2.6B tokens,
-# picked to roughly match Chinchilla's ~20-tokens/param ratio for this
-# 124M model -- would take ~51h at this throughput). Raise --max-iters
-# (and --time proportionally) for a longer/less-undertrained run once
-# there's a bigger time budget available; rescale --warmup-iters/
-# --eval-interval with it to keep the same ~2.5%/1.25%-of-max_iters
-# fractions used here.
+# batch_size=8 (not the more standard 64): a 100-iter dry run of the
+# earlier 124M-param config at batch_size=64 OOM'd during the training
+# forward/backward pass -- the lm_head logits tensor alone is (batch,
+# block_size, vocab_size) = (64, 1024, 32000) fp32 = ~8.4GB, and with no
+# mixed precision (see KNOWN GAP below) several such buffers must coexist
+# for backprop, which exceeded this GPU's 40GB. batch_size=8 fits
+# comfortably, but does mean a noisier gradient per step than batch_size=64
+# would give; if that matters, prefer adding gradient accumulation instead
+# (see KNOWN GAP below) so per-step memory stays low while the effective
+# batch size seen by the optimizer stays at 64. The Kaplan-derived model
+# above is smaller than that 124M config, so batch_size=8 fits with margin
+# to spare here -- raising it is an option, just not required.
+#
+# --warmup-iters/--eval-interval are still set by hand as ~2.5%/1.25% of
+# max_iters (the same fractions the earlier hand-picked config used) --
+# --flops-budget only derives model shape and max_iters, not these.
 #
 # KNOWN GAP: src/model/train.py has no gradient accumulation, no mixed
 # precision (fp32 throughout despite GPT using
@@ -50,7 +70,7 @@
 # docs once you have an account, and adjust --partition/--gpus/--time
 # below accordingly.
 #
-# --time=12:00:00 is sized off the ~9.6h estimate above (see max_iters
+# --time=06:00:00 is sized off the ~5.06h estimate above (see --flops-budget
 # comment) plus buffer -- unlike the CPU-stage numbers elsewhere in this
 # directory (timed on real runs, see scripts/slurm/02_build_final.sh),
 # this is extrapolated from a short 100-iter dry run, not a full timed
@@ -64,7 +84,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00              # sized off measured dry-run throughput, see comment above
+#SBATCH --time=06:00:00              # sized off measured dry-run throughput, see comment above
 #SBATCH --output=runs/%j-07_pretrain.out
 #SBATCH --error=runs/%j-07_pretrain.err
 
@@ -81,14 +101,11 @@ uv run scripts/train.py \
     --out-dir "$PROJECT_STORAGE/runs/pretrain_full" \
     --block-size 1024 \
     --batch-size 8 \
-    --n-layer 12 \
-    --n-head 12 \
-    --n-embd 768 \
-    --max-iters 60000 \
+    --flops-budget 1e17 \
     --lr 3e-4 \
     --min-lr 3e-5 \
-    --warmup-iters 1500 \
-    --eval-interval 750 \
+    --warmup-iters 21043 \
+    --eval-interval 10522 \
     --eval-iters 50 \
     --device auto \
     2>&1 | tee "$LOG_DIR/pretrain.log"

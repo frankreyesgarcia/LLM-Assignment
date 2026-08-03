@@ -203,7 +203,8 @@ class GPT(nn.Module):
         tables. Scaling-law literature (Kaplan et al. 2020) reports model
         size this way, since embedding params scale with vocab size, not
         model "depth/width", and would otherwise distort the loss-vs-N
-        power-law fit -- see scripts/run_scaling_sweep.py.
+        power-law fit -- see src/model/scaling.py, which uses this
+        convention to size runs for a stated compute budget.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
