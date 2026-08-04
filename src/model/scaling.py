@@ -52,3 +52,40 @@ def describe_budget(
         f"({n_params:,} total params): D={tokens:,} tokens -> max_iters={max_iters:,} "
         f"(batch_size={batch_size} x block_size={block_size})"
     )
+
+
+def main() -> None:
+    """CLI: print describe_budget() for one or more --flops-budget values,
+    without training anything. Model shape is an input here, not an
+    output -- see this module's docstring for why.
+
+    Usage: uv run src/model/scaling.py --flops-budget 1e17 1e18 \
+        --vocab-size 32000 --n-layer 8 --n-head 8 --n-embd 512 \
+        --batch-size 8 --block-size 1024
+    """
+    import argparse
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from src.model.gpt import GPT, GPTConfig
+
+    parser = argparse.ArgumentParser(description=main.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--flops-budget", type=float, nargs="+", required=True)
+    parser.add_argument("--vocab-size", type=int, default=32000)
+    parser.add_argument("--n-layer", type=int, default=4)
+    parser.add_argument("--n-head", type=int, default=4)
+    parser.add_argument("--n-embd", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--block-size", type=int, default=128)
+    args = parser.parse_args()
+
+    n_params = GPT(GPTConfig(args.vocab_size, args.block_size, args.n_layer, args.n_head, args.n_embd)).num_params(
+        non_embedding=False
+    )
+    for flops in args.flops_budget:
+        print(describe_budget(flops, n_params, args.n_layer, args.n_head, args.n_embd, args.batch_size, args.block_size))
+
+
+if __name__ == "__main__":
+    main()
