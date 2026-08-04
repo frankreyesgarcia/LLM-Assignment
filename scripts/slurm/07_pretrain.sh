@@ -30,10 +30,7 @@
 # then achieved_flops_per_sec = 6 * n_params_total * measured_tokens_per_sec,
 # and --flops-budget = achieved_flops_per_sec * (desired wall-clock seconds).
 # At 1e17 FLOPs and this shape, that currently resolves to D~=395.6M tokens
-# (max_iters ~=48,293 at batch_size=8 * block_size=1024) -- verify with:
-#   uv run scripts/plan_compute_budget.py --flops-budget 1e17 \
-#       --vocab-size 32000 --n-layer 8 --n-head 8 --n-embd 512 \
-#       --batch-size 8 --block-size 1024
+# (max_iters ~=48,293 at batch_size=8 * block_size=1024).
 # Raise --flops-budget (and --time proportionally, using the same
 # TFLOP/s conversion factor) for a longer run on this same shape once
 # there's a larger time budget available; raising the shape itself needs a

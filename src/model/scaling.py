@@ -42,9 +42,8 @@ def max_iters_for_budget(flops: float, n_params: int, batch_size: int, block_siz
 def describe_budget(
     flops: float, n_params: int, n_layer: int, n_head: int, n_embd: int, batch_size: int, block_size: int
 ) -> str:
-    """One-line human-readable summary, shared by scripts/train.py's
-    --flops-budget and scripts/plan_compute_budget.py so the two don't
-    duplicate this string.
+    """One-line human-readable summary printed by scripts/train.py's
+    --flops-budget.
     """
     tokens = tokens_for_budget(flops, n_params)
     max_iters = max_iters_for_budget(flops, n_params, batch_size, block_size)
