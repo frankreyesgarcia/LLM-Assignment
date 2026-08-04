@@ -3,18 +3,10 @@
 # corpus from scripts/slurm/06_prepare_pretrain_full.sh, via scripts/train.py
 # (thin CLI over src/model/train.py::train_model).
 #
-# Model shape (n_layer/n_head/n_embd below) is hand-picked, not derived: an
-# earlier revision of this file derived it from a compute-optimal N-vs-D
-# split borrowed from Kaplan et al. (2020)'s or Hoffmann et al. (2022)
-# "Chinchilla"'s own fitted scaling-law exponents. Per review, that's
-# invalid -- those exponents come from a regression fit to *their*
-# architecture/optimizer/schedule/tokenizer/dataset, not this repo's, and
-# there's no reason our own loss-vs-(N,D) surface shares them. Deriving our
-# own would mean running Chinchilla's actual "IsoFLOP profiles" method on
-# this repo's own setup (many small training runs + a curve fit) -- scoped
-# to a later branch. For now the shape below (n_layer=8, n_head=8,
-# n_embd=512) is the one already validated by a real dry run on this GPU
-# (see below) rather than a fresh, unvalidated guess.
+# Model shape (n_layer/n_head/n_embd below) is hand-picked, not derived:
+# the shape below (n_layer=8, n_head=8, n_embd=512) is the one already
+# validated by a real dry run on this GPU (see below) rather than a fresh,
+# unvalidated guess.
 #
 # --flops-budget only derives *how long to train that shape* (max_iters),
 # from the FLOPs accounting identity FLOPs(N, D) = 6*N*D (src/model/
@@ -45,8 +37,7 @@
 # Raise --flops-budget (and --time proportionally, using the same
 # TFLOP/s conversion factor) for a longer run on this same shape once
 # there's a larger time budget available; raising the shape itself needs a
-# separate, deliberate choice (or the deferred IsoFLOP-profile fit above),
-# not just a bigger --flops-budget.
+# separate, deliberate choice, not just a bigger --flops-budget.
 #
 # batch_size=8 (not the more standard 64): a 100-iter dry run of an earlier,
 # larger 124M-param config at batch_size=64 OOM'd during the training

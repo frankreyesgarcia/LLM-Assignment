@@ -8,7 +8,7 @@ BLOCK_SIZE = 1024
 
 
 def test_flops_per_param_token():
-    # FLOPs(N, D) ~= 6*N*D -- Kaplan et al. 2020 Section 2.1; Chinchilla Section 3.3/Appendix F.
+    # FLOPs(N, D) ~= 6*N*D -- the forward+backward FLOPs-per-parameter-per-token identity.
     assert FLOPS_PER_PARAM_TOKEN == 6
 
 

@@ -3,10 +3,8 @@
 nanoGPT-style architecture: learned positional embeddings, pre-norm
 LayerNorm, GELU MLP, tied input/output embeddings. Deliberately the
 "simple GPT" option the assignment allows (vs. a modern RoPE/RMSNorm/
-SwiGLU stack) -- fewer moving parts, and it's the reference architecture
-most scaling-law literature (Kaplan et al. 2020, GPT-2/GPT-3) itself
-uses, which matters when this model is later used to reproduce that kind
-of experiment.
+SwiGLU stack) -- fewer moving parts, and it matches the classic
+GPT-2/GPT-3 reference architecture.
 
 A decoder-only transformer is trained on one task: given tokens
 `[t_0, ..., t_{i-1}]`, predict `t_i`, for every position `i` at once
@@ -200,14 +198,11 @@ class GPT(nn.Module):
         """Total parameter count.
 
         `non_embedding=True` excludes the token+positional embedding
-        tables -- the convention Kaplan et al. (2020) uses when reporting
-        model size, since embedding params scale with vocab size, not model
-        "depth/width", and would otherwise distort its loss-vs-N power-law
-        fit. src/model/scaling.py instead uses the `non_embedding=False`
-        total for its FLOPs-per-token accounting (FLOPs(N, D) ~= 6*N*D,
-        which genuinely spends FLOPs on the embedding lookup and output
-        logits matmul -- see Hoffmann et al. 2022 "Chinchilla" Appendix F),
-        not to imply this repo picks model size the way either paper does.
+        tables, since embedding params scale with vocab size, not model
+        "depth/width". src/model/scaling.py instead uses the
+        `non_embedding=False` total for its FLOPs-per-token accounting
+        (FLOPs(N, D) ~= 6*N*D, which genuinely spends FLOPs on the
+        embedding lookup and output logits matmul).
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
