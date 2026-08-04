@@ -80,6 +80,7 @@
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
 #SBATCH --partition=berzelius        # unverified -- see comment above
 #SBATCH --gpus=1
+#SBATCH -C "thin"
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
