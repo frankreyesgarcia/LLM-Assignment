@@ -2,7 +2,7 @@
 
 Kept separate from `scripts/train.py` (a thin CLI wrapper) so the training
 loop is importable/testable on its own -- `scripts/train.py` layers CLI
-parsing and Kaplan compute-budget sizing (src/model/scaling.py) on top of
+parsing and FLOPs-budget sizing (src/model/scaling.py) on top of
 `train_model()` without the loop itself needing to know about either.
 """
 

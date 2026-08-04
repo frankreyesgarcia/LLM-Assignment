@@ -200,11 +200,14 @@ class GPT(nn.Module):
         """Total parameter count.
 
         `non_embedding=True` excludes the token+positional embedding
-        tables. Scaling-law literature (Kaplan et al. 2020) reports model
-        size this way, since embedding params scale with vocab size, not
-        model "depth/width", and would otherwise distort the loss-vs-N
-        power-law fit -- see src/model/scaling.py, which uses this
-        convention to size runs for a stated compute budget.
+        tables -- the convention Kaplan et al. (2020) uses when reporting
+        model size, since embedding params scale with vocab size, not model
+        "depth/width", and would otherwise distort its loss-vs-N power-law
+        fit. src/model/scaling.py instead uses the `non_embedding=False`
+        total for its FLOPs-per-token accounting (FLOPs(N, D) ~= 6*N*D,
+        which genuinely spends FLOPs on the embedding lookup and output
+        logits matmul -- see Hoffmann et al. 2022 "Chinchilla" Appendix F),
+        not to imply this repo picks model size the way either paper does.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:

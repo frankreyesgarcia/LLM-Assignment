@@ -1,5 +1,5 @@
 from .gpt import GPT, GPTConfig
-from .scaling import describe_plan, kaplan_compute_optimal_run, max_iters_for
+from .scaling import describe_budget, max_iters_for_budget, tokens_for_budget
 from .train import TrainConfig, train_model
 
 __all__ = [
@@ -7,7 +7,7 @@ __all__ = [
     "GPTConfig",
     "TrainConfig",
     "train_model",
-    "kaplan_compute_optimal_run",
-    "describe_plan",
-    "max_iters_for",
+    "tokens_for_budget",
+    "max_iters_for_budget",
+    "describe_budget",
 ]

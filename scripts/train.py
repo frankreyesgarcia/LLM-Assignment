@@ -6,24 +6,29 @@ src/model/train.py::train_model.
 Auto-detects cuda vs. cpu (--device auto, the default) -- the same
 command runs unchanged on this CPU-only machine or on a GPU node later.
 
---flops-budget sizes the run for you: given a compute budget in FLOPs, it
-derives model shape (n_layer/n_head/n_embd) and token count (-> max_iters)
-from the Kaplan et al. (2020) compute-optimal allocation (see
-src/model/scaling.py) instead of reading those from the flags below --
-this replaces picking max_iters by hand to fit a wall-clock budget (see
-scripts/slurm/07_pretrain.sh's git history) with picking it from a stated
-compute budget instead.
+--flops-budget sizes *how long to train* the model shape given by
+--n-layer/--n-head/--n-embd (unaffected by this flag -- see those flags'
+own help): given a compute budget in FLOPs and that shape's actual
+parameter count, it derives a token count and --max-iters from the FLOPs
+accounting identity FLOPs(N, D) = 6*N*D (src/model/scaling.py), instead of
+picking max_iters by hand to fit a wall-clock budget (see
+scripts/slurm/07_pretrain.sh's git history). It does not pick model shape
+for you -- src/model/scaling.py's module docstring explains why (in short:
+that needs a compute-optimal N-vs-D scaling law fit to this repo's own
+setup, which is out of scope for this flag).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.model.scaling import describe_plan, kaplan_compute_optimal_run, max_iters_for
+from src.model.gpt import GPT, GPTConfig
+from src.model.scaling import describe_budget, max_iters_for_budget
 from src.model.train import TrainConfig, train_model
 from src.tokenizer.logging_utils import tee_to_log
 
@@ -39,17 +44,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Total training compute budget in FLOPs. When set, --n-layer/--n-head/--n-embd/"
-            "--max-iters below are ignored -- model shape and token count are instead derived "
-            "from the Kaplan et al. (2020) compute-optimal allocation (src/model/scaling.py), "
-            "removing any separate token limit."
+            "Total training compute budget in FLOPs, for the model shape given by --n-layer/"
+            "--n-head/--n-embd. When set, --max-iters below is ignored -- token count and "
+            "max_iters are instead derived from that shape's actual param count and this budget "
+            "(src/model/scaling.py)."
         ),
     )
     parser.add_argument("--block-size", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--n-layer", type=int, default=None, help="Ignored if --flops-budget is set. Default 4.")
-    parser.add_argument("--n-head", type=int, default=None, help="Ignored if --flops-budget is set. Default 4.")
-    parser.add_argument("--n-embd", type=int, default=None, help="Ignored if --flops-budget is set. Default 128.")
+    parser.add_argument("--n-layer", type=int, default=4)
+    parser.add_argument("--n-head", type=int, default=4)
+    parser.add_argument("--n-embd", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument(
         "--max-iters", type=int, default=None, help="Ignored if --flops-budget is set. Default 1000."
@@ -70,21 +75,25 @@ if __name__ == "__main__":
     args = build_arg_parser().parse_args()
 
     if args.flops_budget is not None:
-        overridden = [
-            name
-            for name, val in (("--n-layer", args.n_layer), ("--n-head", args.n_head), ("--n-embd", args.n_embd), ("--max-iters", args.max_iters))
-            if val is not None
-        ]
-        if overridden:
-            print(f"--flops-budget given: ignoring {', '.join(overridden)} (deriving them from the Kaplan compute-optimal allocation instead)")
-        plan = kaplan_compute_optimal_run(args.flops_budget)
-        n_layer, n_head, n_embd = plan["n_layer"], plan["n_head"], plan["n_embd"]
-        max_iters = max_iters_for(plan, args.batch_size, args.block_size)
-        print("Kaplan-optimal sizing: " + describe_plan(plan, args.batch_size, args.block_size))
+        if args.max_iters is not None:
+            print("--flops-budget given: ignoring --max-iters (deriving it from the FLOPs budget instead)")
+        vocab_size = json.loads((args.data_dir / "meta.json").read_text())["vocab_size"]
+        n_params = GPT(
+            GPTConfig(
+                vocab_size=vocab_size,
+                block_size=args.block_size,
+                n_layer=args.n_layer,
+                n_head=args.n_head,
+                n_embd=args.n_embd,
+            )
+        ).num_params(non_embedding=False)
+        max_iters = max_iters_for_budget(args.flops_budget, n_params, args.batch_size, args.block_size)
+        print(
+            describe_budget(
+                args.flops_budget, n_params, args.n_layer, args.n_head, args.n_embd, args.batch_size, args.block_size
+            )
+        )
     else:
-        n_layer = args.n_layer if args.n_layer is not None else 4
-        n_head = args.n_head if args.n_head is not None else 4
-        n_embd = args.n_embd if args.n_embd is not None else 128
         max_iters = args.max_iters if args.max_iters is not None else 1000
 
     cfg = TrainConfig(
@@ -92,9 +101,9 @@ if __name__ == "__main__":
         out_dir=args.out_dir,
         block_size=args.block_size,
         batch_size=args.batch_size,
-        n_layer=n_layer,
-        n_head=n_head,
-        n_embd=n_embd,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_embd=args.n_embd,
         dropout=args.dropout,
         max_iters=max_iters,
         lr=args.lr,
@@ -110,7 +119,7 @@ if __name__ == "__main__":
     with tee_to_log(args.out_dir, "train"):
         result = train_model(cfg)
         print(
-            f"\nDone: {result['n_params_non_embed']:,} non-embedding params, "
+            f"\nDone: {result['n_params_total']:,} total params, "
             f"{result['tokens_seen']:,} tokens seen, "
             f"final val_loss={result['final_val_loss']:.4f} "
             f"({result['elapsed_s']:.1f}s)"
