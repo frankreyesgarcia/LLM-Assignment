@@ -96,13 +96,10 @@ set -euo pipefail
 # use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
-# --wandb streams this run's metrics (train/val loss + perplexity, lr, grad
-# norm, tokens/sec, ...) to Weights & Biases -- see src/model/train.py's
-# TrainConfig wandb_* fields. Needs a logged-in wandb (run `wandb login`
-# once, or set WANDB_API_KEY, same pattern as HF_TOKEN in _common.sh) on
-# whichever account runs this script. If this compute node has no outbound
-# internet access, add `--wandb-mode offline` below and `wandb sync
-# "$PROJECT_STORAGE/runs/pretrain_full/wandb/latest-run"` from a node that does.
+# To log this run to Weights & Biases, add e.g.
+#   --wandb --wandb-project llm-und-pretrain --wandb-run-name pretrain_1e17 \
+# below (needs `wandb login`/WANDB_API_KEY; see src/model/train.py's
+# TrainConfig wandb_* fields for the full option list).
 uv run scripts/train.py \
     --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
     --out-dir "$PROJECT_STORAGE/runs/pretrain_full" \
@@ -116,7 +113,6 @@ uv run scripts/train.py \
     --eval-interval 604 \
     --eval-iters 50 \
     --device auto \
-    --wandb --wandb-project llm-und-pretrain --wandb-run-name pretrain_1e17 \
     2>&1 | tee "$LOG_DIR/pretrain.log"
 
 echo "Checkpoint + logs under: $PROJECT_STORAGE/runs/pretrain_full"
