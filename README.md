@@ -198,6 +198,156 @@ It still trails Sarvam-1 and EuroLLM on hi -- consistent with the
 "hi is data-starved" finding above. Full numbers in
 `artifacts/tokenizer_sweep/baseline_comparison.csv`.
 
+## Task 3 — Pretraining & compute-optimal scaling law
+
+A small GPT-style decoder-only transformer (`src/model/gpt.py`, nanoGPT-style:
+learned positional embeddings, pre-norm LayerNorm, GELU MLP, tied
+input/output embeddings) trained on the tokenized corpus
+(`scripts/prepare_pretrain_data.py`). See `src/model/train.py`/
+`scripts/train.py` for the training loop itself.
+
+Given a compute budget for the real training run, what model size and
+token count should it actually use? Answered via the Chinchilla
+**"IsoFLOP profiles"** method (Hoffmann et al., *Training Compute-Optimal
+Large Language Models*), not by picking a shape by hand or extrapolating a
+loss-vs-compute curve directly (the earlier, Kaplan-style approach this
+replaces -- biased toward oversized, undertrained models, since it doesn't
+hold compute fixed while varying the N-vs-D split):
+
+1. **Sweep.** Train a grid of small GPT models -- 13 widths (16 through
+   768) at each of 5 FLOP budgets `C`, 65 runs total. Width is the one
+   swept knob; head count and depth both derive from it, but on different
+   curves (`src/model/scaling.py::gpt_shape_for_width`): head count keeps
+   head *size* fixed at 64 (standard GPT convention, dropping to a single
+   head below width 64), while depth grows *slower* than width
+   (`n_layer ~ n_embd**0.5`, an exponent fit to the published GPT-2/GPT-3
+   family's own (n_layer, n_embd) pairs, ~0.61 there) instead of the two
+   scaling in lockstep -- there's no principled reason depth and width
+   should move together, and the real GPT family doesn't do that either;
+   models get *wider relative to depth* as they scale up. The curve is
+   anchored to pass exactly through the real run's own shape
+   (`n_layer=8` at `n_embd=512`, `scripts/slurm/07_pretrain.sh`). For a
+   fixed `C`, each width's token count is forced to `D = C/(6N)`
+   (`FLOPs(N, D) ~= 6*N*D`, `N` = total parameters, embeddings included --
+   Chinchilla's own convention, not Kaplan's, since a forward pass
+   genuinely spends FLOPs on the embedding lookup and output-logits
+   matmul) -- so every model at that budget costs exactly `C`, regardless
+   of width. `results.csv` also records each cell's non-embedding
+   parameter count alongside the total, purely so the embedding table's
+   share of `N` (which grows as width shrinks -- the vocab embedding
+   table doesn't shrink with width) is inspectable; only the total is
+   used in the fit. Assumes an effectively infinite dataset (single
+   epoch, no repeated tokens) -- the tokenized corpus has ~510B train
+   tokens, far more than the sweep uses.
+   `scripts/isoflop_sweep.py` (SLURM wrapper: `scripts/slurm/08_isoflop_sweep.sh`).
+2. **Fit a parabola per budget.** Loss vs. `log(N)` at fixed `C` traces a
+   U-shape -- too small underfits, too big barely trains before exhausting
+   that budget's token allowance. The minimum is that budget's
+   compute-optimal `(N_opt, D_opt)`. A vertex is only trusted when the
+   swept widths actually bracket it (`src/model/scaling.py::parabola_vertex`
+   plus an in-range check in `scripts/fit_isoflop_scaling_law.py`) --
+   otherwise it's an extrapolation past the data, not a found minimum, and
+   that budget is dropped from step 3.
+3. **Fit a power law across budgets.** `N_opt(C) = a*C^alpha`,
+   `D_opt(C) = b*C^beta`, fit by log-log linear regression through the
+   per-budget minima (`src/model/scaling.py::fit_power_law`). Extrapolating
+   this to the real run's (much larger) budget gives its recommended shape
+   -- without ever training a model at that size.
+
+```bash
+# 1. Local smoke test (tiny grid, cheap even on CPU) before the real sweep:
+uv run scripts/isoflop_sweep.py --data-dir /path/to/pretrain_full \
+    --out-dir artifacts/isoflop_sweep_smoke \
+    --flop-budgets 1e11 1e12 --widths 32 64 128 --device cpu
+
+# 2. Real sweep (5 FLOP budgets x 13 widths = 65 runs) on Berzelius:
+sbatch scripts/slurm/08_isoflop_sweep.sh
+
+# 3. Fit the scaling law from the sweep's results.csv, and recommend a
+# shape for the real run's FLOPs budget -> artifacts/isoflop_sweep/*.png,
+# fit_summary.json. --min-flops-budget drops budgets too small to have
+# bought any width enough gradient steps for capacity to matter yet (see
+# "Pilot-scale result" below for why this pilot needed it).
+uv run scripts/fit_isoflop_scaling_law.py \
+    --results-csv "$PROJECT_STORAGE/runs/isoflop_sweep/results.csv" \
+    --min-flops-budget 1e14 \
+    --final-flops-budget 1e17
+
+# tests (pure math, no GPU/data needed)
+uv run pytest tests/test_scaling.py -v
+```
+
+**Pilot history** (both pilots below predate the current 13-width,
+depth-slower-than-width grid described above; kept here as the record of
+what each iteration found wrong and fixed -- the numbers themselves are
+superseded, see "Pending" below).
+
+*First pilot* (5 widths x 5 FLOP budgets = 25 runs): `C in [1e13, 3.16e13,
+1e14, 3.16e14, 1e15]` produced a **negative** `N_opt(C)` exponent (-0.24)
+-- bigger budgets recommending *smaller* models. Cause: the smallest
+budgets bought too few gradient steps (3-297, even at the narrowest
+width) for model *capacity* to matter yet, so loss fell monotonically
+with model size instead of tracing a U-shape, and the fitted "minimum"
+was curve-fit noise. Fixed by dropping those budgets
+(`--min-flops-budget`) and shifting the range up to `[1e14, 3.16e14,
+1e15, 1.78e15, 3.16e15]`.
+
+*Second pilot* (same 5 widths -- `64 128 192 384 640` -- x the shifted 5
+budgets): all five budgets now traced bracketed parabolas, giving
+`N_opt(C) = 3.04e+04 * C^0.142`, `D_opt(C) = 5.48e-06 * C^0.858`.
+Self-consistent by construction (exponents sum to 1) and directionally
+right (bigger `C` -> bigger `N_opt` *and* bigger `D_opt`), but the
+`0.142` exponent doesn't line up with either Chinchilla's ~0.5 or
+Kaplan's ~0.7-0.73 -- too far off to be just a "more token-heavy than
+Chinchilla" difference in this pilot's regime. Two likely causes,
+addressed above: (1) only 5 widths per budget, with a gap from 192
+straight to 384, left several budgets' parabolas under-resolved on the
+small-`N` side (visibly not a clean parabola at `C=3.16e14`); (2)
+`n_layer = n_head = width/64` had no grounding -- forcing depth to scale
+in lockstep with width doesn't match how the actual GPT-2/GPT-3 family
+scales, and constrains the swept shape family away from where the real
+compute-optimal point might sit.
+
+**Current result** (13 widths x 5 FLOP budgets = 65 real training runs on
+the tokenized corpus, `artifacts/isoflop_sweep/`, re-run against the
+widened grid and the depth-slower-than-width shape family described
+above): all five budgets now trace clean, bracketed U-shaped parabolas
+with no gaps (`isoflop_loss_curves.png`) -- including `C=3.16e14`, the
+one that motivated widening the grid in the first place -- giving
+
+```
+N_opt(C) = 7.60 * C^0.377
+D_opt(C) = 0.0219 * C^0.623
+```
+
+Both exponents are directionally right and self-consistent by
+construction (`0.377 + 0.623 = 1`). `0.377` sits meaningfully closer to
+Chinchilla's ~0.5 than the previous grid's `0.142` did -- still more
+token-heavy than Chinchilla's own finding, plausibly for the same reason
+noted in the second pilot (this sweep's budgets keep every model well
+short of the near-converged regime a real Chinchilla-scale sweep trains
+in), but no longer off by a factor that pointed at a methodology problem
+rather than a scale-of-pilot one. `n_params_non_embedding` in
+`results.csv` also confirms why the small-`N` side needed the finer,
+sub-64-width grid: the embedding table's share of total `N` ranges from
+26% (widest models) up to **99.4%** at the narrowest (width=16) -- at
+that width the swept "model" is almost entirely the vocab embedding
+table, with the transformer body itself contributing under 1% of `N`.
+
+Extrapolated to the real run's `--final-flops-budget=1e17`:
+**N_opt ~= 19.5M params, D_opt ~= 855M tokens** (nearest feasible shape:
+`n_layer=6, n_head=5, n_embd=320`). For comparison, the real run already
+completed via `07_pretrain.sh` used a *hand-picked* shape at the same
+1e17 budget -- `n_layer=8, n_head=8, n_embd=512` (42.1M params, ~396M
+tokens) -- about **2.2x more params and 2.2x fewer tokens** than this fit
+recommends (both satisfy `6ND ~= 1e17` exactly; only the split differs).
+Directionally consistent with the real Chinchilla finding that hand-picked
+shapes from that era tended to be oversized and undertrained relative to
+compute-optimal, and a much more moderate gap than the earlier grid's
+(bogus) 5.3x figure -- consistent with that earlier fit's `0.142`
+exponent being the symptom of a too-coarse grid and an ungrounded depth
+rule, not a real property of this model family's compute-optimal split.
+
 ## Known findings (2026-07-17)
 
 - Measured hi-fineweb2/hi-sangraha overlap by hand (custom exact + MinHash
