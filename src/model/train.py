@@ -1,8 +1,9 @@
 """Task 3 — the pretraining loop itself, as importable functions.
 
-Kept separate from `scripts/train.py` (a thin CLI wrapper) so
-`scripts/run_scaling_sweep.py` can call `train_model()` directly in-process
-for each grid point, instead of shelling out to a subprocess per run.
+Kept separate from `scripts/train.py` (a thin CLI wrapper) so the training
+loop is importable/testable on its own -- `scripts/train.py` layers CLI
+parsing and FLOPs-budget sizing (src/model/scaling.py) on top of
+`train_model()` without the loop itself needing to know about either.
 """
 
 from __future__ import annotations
@@ -118,10 +119,9 @@ def estimate_loss(model: GPT, data: dict[str, np.memmap], cfg: TrainConfig, devi
 def train_model(cfg: TrainConfig) -> dict:
     """Run pretraining for `cfg.max_iters` steps; return a result summary.
 
-    Used both by `scripts/train.py` (one run, full logging/checkpointing)
-    and `scripts/run_scaling_sweep.py` (many runs, summary only) -- the
-    `log_every_eval`/`out_dir` knobs let the sweep skip the I/O it doesn't
-    need without duplicating the training loop itself.
+    `out_dir=None`/`log_every_eval=False` skip checkpointing/console
+    logging respectively, so this is also usable from tests or short
+    smoke runs without writing files or spamming stdout.
     """
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda" if (cfg.device == "auto" and torch.cuda.is_available()) else ("cpu" if cfg.device == "auto" else cfg.device))
