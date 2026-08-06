@@ -205,6 +205,16 @@ learned positional embeddings, pre-norm LayerNorm, GELU MLP, tied
 embeddings) trains on the tokenized corpus (`scripts/prepare_pretrain_data.py`;
 loop in `src/model/train.py`/`scripts/train.py`).
 
+**W&B logging** (off by default): pass `--wandb` to `scripts/train.py` (already
+on in `scripts/slurm/07_pretrain.sh`) to stream train/val loss + perplexity,
+lr, grad norm, tokens seen/sec, elapsed time, per-step loss, and the run's
+full config + param counts to [Weights & Biases](https://wandb.ai). Needs
+`wandb login` (or `WANDB_API_KEY`) once; `--wandb-mode offline` +
+`wandb sync` works from cluster nodes without outbound internet. See
+`TrainConfig`'s `wandb_*` fields (`src/model/train.py`) or `--help` for the
+full flag list (`--wandb-project`/`--wandb-entity`/`--wandb-run-name`/
+`--wandb-tags`).
+
 Given a compute budget for the real run, what model size and token count
 should it use? Answered via Chinchilla's **IsoFLOP profiles** method
 (Hoffmann et al., *Training Compute-Optimal Large Language Models*) rather

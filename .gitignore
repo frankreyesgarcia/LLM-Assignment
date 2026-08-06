@@ -4,6 +4,7 @@ __pycache__/
 data/
 artifacts/
 runs/
+wandb/
 .venv/
 *.egg-info/
 

@@ -20,6 +20,7 @@ dependencies = [
     "datatrove>=0.8.0",
     "torch>=2.13.0",
     "scipy>=1.13",
+    "wandb>=0.19",
 ]
 
 [dependency-groups]

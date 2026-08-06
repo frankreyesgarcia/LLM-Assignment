@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +40,18 @@ class TrainConfig:
     device: str = "auto"
     seed: int = 1337
     log_every_eval: bool = True
+    # W&B (https://wandb.ai) run logging -- off by default so existing
+    # callers (tests, isoflop_sweep.py's many short-lived cells) don't
+    # need a wandb account/API key just to call train_model(). wandb_mode
+    # is passed straight through to wandb.init(mode=...) -- set it to
+    # "offline" on cluster compute nodes without outbound internet access
+    # (`wandb sync` the run directory from a node that has it afterward).
+    use_wandb: bool = False
+    wandb_project: str = "llm-und-pretrain"
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_tags: tuple[str, ...] | None = None
+    wandb_mode: str | None = None
 
 
 def load_data(data_dir: Path) -> tuple[np.memmap, np.memmap, dict]:
@@ -137,6 +149,8 @@ def train_model(cfg: TrainConfig) -> dict:
     )
     model = GPT(model_cfg).to(device)
     optimizer = configure_optimizer(model, cfg.weight_decay, cfg.lr)
+    n_params_total = model.num_params(non_embedding=False)
+    n_params_non_embed = model.num_params(non_embedding=True)
 
     out_dir = cfg.out_dir
     log_path = None
@@ -144,57 +158,110 @@ def train_model(cfg: TrainConfig) -> dict:
         out_dir.mkdir(parents=True, exist_ok=True)
         log_path = out_dir / "log.jsonl"
 
+    wandb_run = None
+    if cfg.use_wandb:
+        import wandb
+
+        run_config = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()}
+        run_config.update(
+            device=str(device),
+            n_params_total=n_params_total,
+            n_params_non_embed=n_params_non_embed,
+            vocab_size=meta["vocab_size"],
+        )
+        wandb_run = wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity,
+            name=cfg.wandb_run_name,
+            tags=list(cfg.wandb_tags) if cfg.wandb_tags else None,
+            mode=cfg.wandb_mode,
+            config=run_config,
+            dir=str(out_dir) if out_dir is not None else None,
+        )
+
     best_val_loss = float("inf")
     history: list[dict] = []
     start = time.time()
     tokens_per_iter = cfg.batch_size * cfg.block_size
 
-    for it in range(cfg.max_iters):
-        lr = lr_at(it, cfg)
-        for group in optimizer.param_groups:
-            group["lr"] = lr
+    try:
+        for it in range(cfg.max_iters):
+            lr = lr_at(it, cfg)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
 
-        if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
-            losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device)
-            record = {
-                "iter": it,
-                "train_loss": losses["train"],
-                "val_loss": losses["val"],
-                "lr": lr,
-                "tokens_seen": it * tokens_per_iter,
-                "elapsed_s": time.time() - start,
-            }
-            history.append(record)
-            if cfg.log_every_eval:
-                print(
-                    f"iter {it:5d} | train_loss {losses['train']:.4f} | "
-                    f"val_loss {losses['val']:.4f} | lr {lr:.2e} | "
-                    f"tokens {record['tokens_seen']:,}"
-                )
-            if log_path is not None:
-                with open(log_path, "a") as f:
-                    f.write(json.dumps(record) + "\n")
-            if out_dir is not None and losses["val"] < best_val_loss:
-                best_val_loss = losses["val"]
-                torch.save(
-                    {"model_state_dict": model.state_dict(), "model_cfg": model_cfg, "iter_num": it},
-                    out_dir / "ckpt.pt",
-                )
+            if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
+                losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device)
+                elapsed_s = time.time() - start
+                tokens_seen = it * tokens_per_iter
+                record = {
+                    "iter": it,
+                    "train_loss": losses["train"],
+                    "val_loss": losses["val"],
+                    "lr": lr,
+                    "tokens_seen": tokens_seen,
+                    "elapsed_s": elapsed_s,
+                }
+                history.append(record)
+                if cfg.log_every_eval:
+                    print(
+                        f"iter {it:5d} | train_loss {losses['train']:.4f} | "
+                        f"val_loss {losses['val']:.4f} | lr {lr:.2e} | "
+                        f"tokens {record['tokens_seen']:,}"
+                    )
+                if log_path is not None:
+                    with open(log_path, "a") as f:
+                        f.write(json.dumps(record) + "\n")
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "train/loss": losses["train"],
+                            "train/perplexity": float(np.exp(losses["train"])),
+                            "val/loss": losses["val"],
+                            "val/perplexity": float(np.exp(losses["val"])),
+                            "val/best_loss": min(best_val_loss, losses["val"]),
+                            "lr": lr,
+                            "tokens_seen": tokens_seen,
+                            "tokens_per_sec": tokens_seen / elapsed_s if elapsed_s > 0 else 0.0,
+                            "elapsed_s": elapsed_s,
+                        },
+                        step=it,
+                    )
+                if out_dir is not None and losses["val"] < best_val_loss:
+                    best_val_loss = losses["val"]
+                    torch.save(
+                        {"model_state_dict": model.state_dict(), "model_cfg": model_cfg, "iter_num": it},
+                        out_dir / "ckpt.pt",
+                    )
 
-        x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
-        _, loss = model(x, y)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        optimizer.step()
+            x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
+            _, loss = model(x, y)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            optimizer.step()
 
-    final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device)
+            if wandb_run is not None:
+                wandb_run.log({"train/step_loss": loss.item(), "grad_norm": grad_norm.item(), "lr": lr}, step=it)
+
+        final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device)
+        elapsed_s = time.time() - start
+        if wandb_run is not None:
+            wandb_run.summary["final_train_loss"] = final["train"]
+            wandb_run.summary["final_val_loss"] = final["val"]
+            wandb_run.summary["best_val_loss"] = min(best_val_loss, final["val"])
+            wandb_run.summary["tokens_seen"] = cfg.max_iters * tokens_per_iter
+            wandb_run.summary["elapsed_s"] = elapsed_s
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
+
     return {
-        "n_params_total": model.num_params(non_embedding=False),
-        "n_params_non_embed": model.num_params(non_embedding=True),
+        "n_params_total": n_params_total,
+        "n_params_non_embed": n_params_non_embed,
         "tokens_seen": cfg.max_iters * tokens_per_iter,
         "final_train_loss": final["train"],
         "final_val_loss": final["val"],
         "history": history,
-        "elapsed_s": time.time() - start,
+        "elapsed_s": elapsed_s,
     }
