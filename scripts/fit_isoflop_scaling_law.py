@@ -142,7 +142,11 @@ def budget_color_map(all_budgets: list[float]) -> dict[float, str]:
     budget gets excluded from the power-law fit (fit_per_budget_minima),
     desynchronizing plot_frontier's colors from plot_loss_vs_params's.
     """
-    return {c: BUDGET_COLORS[i % len(BUDGET_COLORS)] for i, c in enumerate(all_budgets)}
+    if len(all_budgets) > len(BUDGET_COLORS):
+        raise ValueError(
+            f"Need {len(all_budgets)} colors for budgets, but only {len(BUDGET_COLORS)} are defined; extend BUDGET_COLORS."
+        )
+    return {c: BUDGET_COLORS[i] for i, c in enumerate(all_budgets)}
 
 
 def plot_loss_vs_params(
