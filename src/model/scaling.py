@@ -34,12 +34,16 @@ import numpy as np
 FLOPS_PER_PARAM_TOKEN = 6
 
 # Attention head size (n_embd / n_head), held fixed across the whole
-# IsoFLOP width grid. Not a derived constant -- it's the convention GPT-2
-# introduced and which stuck as the de facto default across the GPT
-# family; also already what this repo's own real run uses
-# (scripts/slurm/07_pretrain.sh: n_layer=8, n_head=8, n_embd=512 ->
-# 512/8=64), so the sweep's models stay shape-consistent with it instead
-# of introducing a new, unrelated convention.
+# IsoFLOP width grid. Not a derived constant -- it's the convention all
+# four official GPT-2 variants use (768/12, 1024/16, 1280/20, 1600/25 all
+# = 64) and GPT-3's smaller variants keep too, though not held rigidly at
+# the largest scale (full GPT-3-175B grows head size to 128 instead --
+# see Levinstein, "A Conceptual Guide to Transformers, Part II":
+# https://benlevinstein.substack.com/p/a-conceptual-guide-to-transformers-b70).
+# Also already what this repo's own real run uses (scripts/slurm/
+# 07_pretrain.sh: n_layer=8, n_head=8, n_embd=512 -> 512/8=64), so the
+# sweep's models stay shape-consistent with it instead of introducing a
+# new, unrelated convention.
 WIDTH_HEAD_DIM = 64
 
 # gpt_shape_for_width anchors its depth curve to the real run's own shape
