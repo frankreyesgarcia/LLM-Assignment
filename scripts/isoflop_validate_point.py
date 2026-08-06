@@ -37,6 +37,11 @@ Usage:
         --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
         --out-dir "$PROJECT_STORAGE/runs/isoflop_validate_10x" \
         --flops-budget 3.16e16 --width 128 --device cuda:0
+
+On SLURM: a one-off validation point doesn't warrant its own sbatch
+wrapper script -- reuse scripts/slurm/08_isoflop_sweep.sh's #SBATCH
+resources (drop --gpus to 1, single cell not a multi-GPU grid) and swap
+its `uv run` line for the one above.
 """
 
 from __future__ import annotations
