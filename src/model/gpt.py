@@ -23,6 +23,80 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+
+# torch.compile is what fuses the mask predicate into the attention kernel;
+# eager is numerically identical but only worth compiling on GPU.
+_compiled_flex_attention = None
+_compiled_create_block_mask = None
+
+
+def _flex_ops(device: torch.device):
+    """Return (flex_attention, create_block_mask), compiled on CUDA."""
+    global _compiled_flex_attention, _compiled_create_block_mask
+    if device.type != "cuda":
+        return flex_attention, create_block_mask
+    if _compiled_flex_attention is None:
+        _compiled_flex_attention = torch.compile(flex_attention, dynamic=False)
+        _compiled_create_block_mask = torch.compile(create_block_mask, dynamic=False)
+    return _compiled_flex_attention, _compiled_create_block_mask
+
+
+def build_document_block_mask(doc_id: torch.Tensor) -> BlockMask:
+    """Block-diagonal causal mask: attend within your own document only.
+
+    `doc_id` is (B, T), non-decreasing along T (src/model/train.py::document_ids).
+
+    The mask is a predicate over indices, not a tensor: create_block_mask
+    evaluates it once per (128, 128) tile so entirely-masked tiles are
+    skipped wholesale. Built once per forward and shared across layers --
+    it depends only on positions, which no layer changes.
+    """
+    B, T = doc_id.shape
+
+    def document_causal(b, h, q_idx, kv_idx):
+        return (q_idx >= kv_idx) & (doc_id[b, q_idx] == doc_id[b, kv_idx])
+
+    _, create = _flex_ops(doc_id.device)
+    # H=None: shared across heads, so broadcast rather than stored per-head.
+    return create(document_causal, B=B, H=None, Q_LEN=T, KV_LEN=T, device=doc_id.device)
+
+
+def build_document_dense_mask(doc_id: torch.Tensor) -> torch.Tensor:
+    """(B, 1, T, T) boolean form of the same mask, for the CPU path.
+
+    Eager FlexAttention has no CPU backward kernel, so CPU falls back to
+    scaled_dot_product_attention with an explicit mask. Identical maths
+    (asserted in tests), O(T^2) memory -- fine for tests and smoke runs.
+    """
+    causal = torch.ones(doc_id.shape[1], doc_id.shape[1], dtype=torch.bool, device=doc_id.device).tril()
+    same_doc = doc_id[:, :, None] == doc_id[:, None, :]
+    return (causal & same_doc).unsqueeze(1)
+
+
+def build_document_mask(doc_id: torch.Tensor) -> BlockMask | torch.Tensor:
+    """Pick the mask representation the device can actually run."""
+    if doc_id.device.type == "cuda":
+        return build_document_block_mask(doc_id)
+    return build_document_dense_mask(doc_id)
+
+
+def positions_within_document(doc_id: torch.Tensor) -> torch.Tensor:
+    """Position index restarting at 0 at each document boundary.
+
+    Companion to the mask: a document that can only attend to itself should
+    also be told it starts at position 0. Otherwise wpe[700] is trained on
+    a mixture of "700 tokens into a document" and "20 tokens into the third
+    document of a window", and means neither.
+    """
+    B, T = doc_id.shape
+    t = torch.arange(T, device=doc_id.device)
+    is_start = torch.ones_like(doc_id, dtype=torch.bool)
+    is_start[:, 1:] = doc_id[:, 1:] != doc_id[:, :-1]
+    # Running max of "index, but only at document starts" == index of the
+    # most recent start. Valid because t is increasing.
+    doc_start = torch.cummax(torch.where(is_start, t, torch.zeros_like(t)), dim=1).values
+    return t - doc_start
 
 
 @dataclass
@@ -64,7 +138,7 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, block_mask: BlockMask | torch.Tensor | None = None) -> torch.Tensor:
         B, T, C = x.size()  # batch, sequence length, embedding dim
 
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -75,17 +149,27 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
 
-        # scaled_dot_product_attention computes softmax(Q K^T / sqrt(d)) V
-        # with the causal mask fused in (is_causal=True) -- position i's
-        # query can only attend to keys/values at positions <= i. PyTorch
-        # picks the fastest available kernel for the device (flash
-        # attention on supported GPUs, a plain math fallback on CPU), so
-        # this line doesn't change when this later runs on a GPU cluster.
-        y = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=True,
-        )
+        if block_mask is None:
+            # scaled_dot_product_attention computes softmax(Q K^T / sqrt(d)) V
+            # with the causal mask fused in (is_causal=True) -- position i's
+            # query can only attend to keys/values at positions <= i. PyTorch
+            # picks the fastest available kernel for the device (flash
+            # attention on supported GPUs, a plain math fallback on CPU), so
+            # this line doesn't change when this later runs on a GPU cluster.
+            y = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True,
+            )
+        elif isinstance(block_mask, BlockMask):
+            # Same computation, but visibility is causal *and* same-document.
+            # FlexAttention takes no dropout_p; GPT.forward rejects that
+            # combination up front rather than silently dropping it here.
+            flex, _ = _flex_ops(x.device)
+            y = flex(q, k, v, block_mask=block_mask)
+        else:
+            # CPU fallback: the same mask as a dense boolean tensor.
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=block_mask)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
@@ -139,8 +223,8 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x: torch.Tensor, block_mask: BlockMask | torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x), block_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -214,20 +298,41 @@ class GPT(nn.Module):
         return n_params
 
     def forward(
-        self, idx: torch.Tensor, targets: torch.Tensor | None = None
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        doc_id: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Forward pass; `doc_id` (B, T) enables intra-document masking.
+
+        `doc_id=None` is plain causal attention over the whole window (the
+        GPT-2/nanoGPT default, and what generation uses). Given `doc_id`,
+        each packed document attends only to itself and counts positions
+        from 0, so documents sharing a window behave as if run separately.
+        """
         device = idx.device
         B, T = idx.size()
         assert T <= self.config.block_size, (
             f"sequence length {T} exceeds block_size {self.config.block_size}"
         )
-        pos = torch.arange(0, T, dtype=torch.long, device=device)
+
+        if doc_id is None:
+            block_mask = None
+            pos = torch.arange(0, T, dtype=torch.long, device=device)
+        else:
+            assert doc_id.shape == idx.shape, f"doc_id {tuple(doc_id.shape)} != idx {tuple(idx.shape)}"
+            assert not (self.training and self.config.dropout > 0), (
+                "attention dropout is unsupported alongside document masking "
+                "(FlexAttention takes no dropout_p); use dropout=0.0"
+            )
+            block_mask = build_document_mask(doc_id)
+            pos = positions_within_document(doc_id)  # (B, T), not (T,)
 
         tok_emb = self.transformer.wte(idx)  # (B, T, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # (T, n_embd), broadcasts over batch
+        pos_emb = self.transformer.wpe(pos)  # (T, n_embd) or (B, T, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, block_mask)
         x = self.transformer.ln_f(x)
 
         logits = self.lm_head(x)  # (B, T, vocab_size)

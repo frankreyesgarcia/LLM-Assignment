@@ -66,6 +66,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--eval-interval", type=int, default=100)
     parser.add_argument("--eval-iters", type=int, default=20)
+    parser.add_argument(
+        "--no-doc-masking",
+        dest="doc_masking",
+        action="store_false",
+        help="Disable intra-document attention masking (plain causal attention across the "
+        "whole packed window, the GPT-2/nanoGPT default), for ablation at matched FLOPs.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument(
@@ -142,6 +149,7 @@ if __name__ == "__main__":
         wandb_run_name=args.wandb_run_name,
         wandb_tags=tuple(args.wandb_tags) if args.wandb_tags else None,
         wandb_mode=args.wandb_mode,
+        doc_masking=args.doc_masking,
     )
     with tee_to_log(args.out_dir, "train"):
         result = train_model(cfg)

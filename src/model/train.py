@@ -52,6 +52,11 @@ class TrainConfig:
     wandb_run_name: str | None = None
     wandb_tags: tuple[str, ...] | None = None
     wandb_mode: str | None = None
+    # Mask attention across document boundaries and restart positional
+    # indices per document. 43.7% of tokens in a 1024-token window of this
+    # repo's train.bin have an EOS before them, so this is not a rare
+    # corner. A flag so it can be ablated at matched FLOPs.
+    doc_masking: bool = True
 
 
 def load_data(data_dir: Path) -> tuple[np.memmap, np.memmap, dict]:
@@ -77,6 +82,26 @@ def get_batch(data: np.memmap, block_size: int, batch_size: int, device: torch.d
     else:
         x, y = x.to(device), y.to(device)
     return x, y
+
+
+def document_ids(x: torch.Tensor, eos_id: int) -> torch.Tensor:
+    """Label each token in (B, T) with the index of its document in the window.
+
+    Documents are packed as `[...tokens, EOS]`, so an EOS terminates its own
+    document. Subtracting the EOS indicator keeps it there rather than
+    opening the next one -- which is what lets the model still learn to
+    predict EOS from that document's content.
+
+        x       = [a, b, EOS, c, d]
+        cumsum  = [0, 0,   1, 1, 1]
+        - is_eos= [0, 0,   0, 1, 1]   <- EOS stays in document 0
+
+    The window's first document is usually a fragment (the random offset
+    lands mid-document); it gets id 0, which is correct -- its true prefix
+    is simply not present.
+    """
+    is_eos = x == eos_id
+    return is_eos.cumsum(dim=1) - is_eos.long()
 
 
 def lr_at(it: int, cfg: TrainConfig) -> float:
@@ -114,14 +139,19 @@ def configure_optimizer(model: GPT, weight_decay: float, lr: float) -> torch.opt
 
 
 @torch.no_grad()
-def estimate_loss(model: GPT, data: dict[str, np.memmap], cfg: TrainConfig, device: torch.device) -> dict[str, float]:
+def estimate_loss(
+    model: GPT, data: dict[str, np.memmap], cfg: TrainConfig, device: torch.device, eos_id: int | None = None
+) -> dict[str, float]:
     out = {}
     model.eval()
     for split, arr in data.items():
         losses = torch.zeros(cfg.eval_iters)
         for i in range(cfg.eval_iters):
             x, y = get_batch(arr, cfg.block_size, cfg.batch_size, device)
-            _, loss = model(x, y)
+            # Same masking as training, or val_loss measures a context
+            # regime the model was never trained in.
+            doc_id = document_ids(x, eos_id) if eos_id is not None else None
+            _, loss = model(x, y, doc_id=doc_id)
             losses[i] = loss.item()
         out[split] = losses.mean().item()
     model.train()
@@ -151,6 +181,8 @@ def train_model(cfg: TrainConfig) -> dict:
     optimizer = configure_optimizer(model, cfg.weight_decay, cfg.lr)
     n_params_total = model.num_params(non_embedding=False)
     n_params_non_embed = model.num_params(non_embedding=True)
+
+    eos_id = meta["eos_token_id"] if cfg.doc_masking else None
 
     out_dir = cfg.out_dir
     log_path = None
@@ -191,7 +223,7 @@ def train_model(cfg: TrainConfig) -> dict:
                 group["lr"] = lr
 
             if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
-                losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device)
+                losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
                 elapsed_s = time.time() - start
                 tokens_seen = it * tokens_per_iter
                 record = {
@@ -235,7 +267,11 @@ def train_model(cfg: TrainConfig) -> dict:
                     )
 
             x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
-            _, loss = model(x, y)
+            # The EOS position's target is the next document's first token,
+            # which masking makes unpredictable. Left in anyway: ~1 token in
+            # 767, and it keeps loss comparable to the doc_masking=False arm.
+            doc_id = document_ids(x, eos_id) if eos_id is not None else None
+            _, loss = model(x, y, doc_id=doc_id)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -244,7 +280,7 @@ def train_model(cfg: TrainConfig) -> dict:
             if wandb_run is not None:
                 wandb_run.log({"train/step_loss": loss.item(), "grad_norm": grad_norm.item(), "lr": lr}, step=it)
 
-        final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device)
+        final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
         elapsed_s = time.time() - start
         if wandb_run is not None:
             wandb_run.summary["final_train_loss"] = final["train"]
@@ -257,6 +293,7 @@ def train_model(cfg: TrainConfig) -> dict:
             wandb_run.finish()
 
     return {
+        "doc_masking": cfg.doc_masking,
         "n_params_total": n_params_total,
         "n_params_non_embed": n_params_non_embed,
         "tokens_seen": cfg.max_iters * tokens_per_iter,
