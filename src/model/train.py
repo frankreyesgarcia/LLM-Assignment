@@ -57,6 +57,14 @@ class TrainConfig:
     # repo's train.bin have an EOS before them, so this is not a rare
     # corner. A flag so it can be ablated at matched FLOPs.
     doc_masking: bool = True
+    # Save a checkpoint (out_dir/ckpt_iter{N}.pt) every this many iterations,
+    # regardless of val loss -- distinct from the "best val loss so far"
+    # ckpt.pt below, which only helps if you're willing to lose everything
+    # since the last improvement. None (default) disables this: a multi-hour
+    # real pretraining run (scripts/slurm/07_pretrain.sh) wants these for
+    # crash recovery and for inspecting training dynamics at fixed points,
+    # but short-lived callers (tests, isoflop_sweep.py's cells) don't.
+    checkpoint_interval: int | None = None
 
 
 def load_data(data_dir: Path) -> tuple[np.memmap, np.memmap, dict]:
@@ -265,6 +273,15 @@ def train_model(cfg: TrainConfig) -> dict:
                         {"model_state_dict": model.state_dict(), "model_cfg": model_cfg, "iter_num": it},
                         out_dir / "ckpt.pt",
                     )
+
+            # Periodic snapshot, independent of eval_interval/best_val_loss
+            # above -- see TrainConfig.checkpoint_interval's docstring for why
+            # this is a separate knob rather than piggybacking on those.
+            if out_dir is not None and cfg.checkpoint_interval is not None and it > 0 and it % cfg.checkpoint_interval == 0:
+                torch.save(
+                    {"model_state_dict": model.state_dict(), "model_cfg": model_cfg, "iter_num": it},
+                    out_dir / f"ckpt_iter{it:07d}.pt",
+                )
 
             x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
             # The EOS position's target is the next document's first token,
