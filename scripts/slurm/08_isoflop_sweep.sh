@@ -48,8 +48,7 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_commo
 uv run scripts/isoflop_sweep.py \
     --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
     --out-dir "$PROJECT_STORAGE/runs/isoflop_sweep_v2" \
-    --devices cuda:0 cuda:1 cuda:2 cuda:3 \
-    2>&1 | tee "$LOG_DIR/isoflop_sweep.log"
+    --devices cuda:0 cuda:1 cuda:2 cuda:3
 
 echo "Results CSV + logs under: $PROJECT_STORAGE/runs/isoflop_sweep_v2"
 echo "Next: uv run scripts/fit_isoflop_scaling_law.py --results-csv $PROJECT_STORAGE/runs/isoflop_sweep_v2/results.csv"

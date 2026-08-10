@@ -112,7 +112,6 @@ uv run scripts/train.py \
     --warmup-iters 1207 \
     --eval-interval 604 \
     --eval-iters 50 \
-    --device auto \
-    2>&1 | tee "$LOG_DIR/pretrain.log"
+    --device auto
 
 echo "Checkpoint + logs under: $PROJECT_STORAGE/runs/pretrain_full"

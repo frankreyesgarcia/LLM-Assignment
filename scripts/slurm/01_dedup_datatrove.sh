@@ -70,7 +70,6 @@ uv run scripts/run_dedup_datatrove.py \
     --tasks 150 \
     --account "$PROJECT_ACCOUNT" \
     --partition berzelius-cpu \
-    --time 04:00:00 \
-    2>&1 | tee "$LOG_DIR/dedup_datatrove.log"
+    --time 04:00:00
 
 echo "Deduped output under: $PROJECT_STORAGE/data/processed"

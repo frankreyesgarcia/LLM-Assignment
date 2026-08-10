@@ -77,7 +77,7 @@ set -euo pipefail
 # use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
-uv run python - <<PYEOF 2>&1 | tee "$LOG_DIR/build_final.log"
+uv run python - <<PYEOF
 import sys
 sys.path.insert(0, ".")
 from pathlib import Path

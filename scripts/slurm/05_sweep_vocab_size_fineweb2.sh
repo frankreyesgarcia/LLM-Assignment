@@ -40,7 +40,6 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_commo
 
 uv run scripts/sweep_vocab_size.py \
     --processed-dir "$PROJECT_STORAGE/data/processed" \
-    --out-dir "$PROJECT_STORAGE/artifacts/tokenizer_sweep_deduped" \
-    2>&1 | tee "$LOG_DIR/sweep_vocab_size.log"
+    --out-dir "$PROJECT_STORAGE/artifacts/tokenizer_sweep_deduped"
 
 echo "Sweep results under: $PROJECT_STORAGE/artifacts/tokenizer_sweep_deduped"

@@ -48,8 +48,3 @@ cd "$REPO_ROOT"
 command -v uv >/dev/null || { echo "uv not found on PATH -- install it first (curl -LsSf https://astral.sh/uv/install.sh | sh)"; exit 1; }
 
 uv sync --frozen
-
-RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%dT%H%M%S)}"
-LOG_DIR="$REPO_ROOT/runs/$RUN_ID"
-mkdir -p "$LOG_DIR"
-echo "Logs/counters for this run: $LOG_DIR"
