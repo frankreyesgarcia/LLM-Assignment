@@ -17,7 +17,15 @@ L(C) = E + A*C^-alpha (irreducible-loss floor) -- see fit_per_budget_minima's
 call site for why -- so treat its extrapolation as a rough check, not a
 precise prediction.
 
-Renders the four standard plots (training loss vs. params per budget;
+Both losses are fit. The reported law and the shape recommendation come
+from *validation* loss (FIT_LOSS_KEY) -- the held-out quantity the law is
+meant to predict -- and the training-loss fit is a cross-check: the
+N_opt(C) exponent depends on the loss surface's curvature rather than its
+level, so over one distribution the two should agree. The comparison is
+made against the exponents' own jackknife error, since with a handful of
+budgets that error is large (see EXPONENT_AGREEMENT_SIGMAS).
+
+Renders the four standard plots (loss vs. params per budget;
 FLOPs vs. optimal params; FLOPs vs. optimal tokens; FLOPs vs. optimal loss)
 plus a fit_summary.json with the fitted coefficients and the recommended
 shape.
@@ -62,13 +70,33 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BUDGET_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 FIT_LINE_COLOR = "#3a3a38"
 
+# Which loss drives the reported law and the shape recommendation.
+# Validation, not training: the quantity the scaling law is meant to
+# predict is held-out loss, and picking a shape by training loss rewards
+# whichever cell memorized its (budget-determined) token allowance best.
+FIT_LOSS_KEY = "val_loss"
+FIT_LOSS_LABEL = "validation"
+
+# Both losses get fit, keyed to the label used in plots and messages.
+LOSS_KEYS = {"val_loss": "validation", "train_loss": "training"}
+
+# The two exponents are compared against their own jackknife standard
+# error, not a fixed tolerance. With only a handful of budgets an
+# exponent is determined to about +-0.1 (v2: SE 0.12 train, 0.11 val), so
+# any fixed threshold small enough to be interesting fires on noise. Flag
+# only gaps beyond this many combined SEs. Note the two fits share the
+# same runs and are therefore correlated, which makes the independent-SE
+# combination below an over-estimate -- i.e. this test errs toward *not*
+# flagging.
+EXPONENT_AGREEMENT_SIGMAS = 2.0
+
 
 def load_results(csv_path: Path) -> dict[float, list[dict]]:
     """One point per (budget, width) cell. A cell trained more than once
     (scripts/isoflop_sweep.py --repeats, one row per seed) collapses to the
     mean of its repeats, so a cell contributes one point to the parabola
-    regardless of how many times it was run; "n_runs"/"train_loss_std"
-    carry the spread for reporting."""
+    regardless of how many times it was run; "n_runs"/"loss_std" carry the
+    spread for reporting."""
     cells: dict[tuple[float, int], list[dict]] = defaultdict(list)
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
@@ -92,10 +120,11 @@ def load_results(csv_path: Path) -> dict[float, list[dict]]:
                 "train_loss": float(np.mean(train)),
                 "val_loss": float(np.mean(val)),
                 "n_runs": len(rows),
-                # Spread across repeats: the run-to-run noise this cell's
-                # mean is averaging down. 0.0 for a single-run cell, which
-                # measures nothing rather than meaning "no noise".
-                "train_loss_std": float(np.std(train, ddof=1)) if len(train) > 1 else 0.0,
+                # Spread across repeats of the fitted loss: the run-to-run
+                # noise this cell's mean is averaging down. 0.0 for a
+                # single-run cell, which measures nothing rather than
+                # meaning "no noise".
+                "loss_std": float(np.std(val if FIT_LOSS_KEY == "val_loss" else train, ddof=1)) if len(rows) > 1 else 0.0,
             }
         )
     for rows in by_budget.values():
@@ -105,6 +134,7 @@ def load_results(csv_path: Path) -> dict[float, list[dict]]:
 
 def fit_per_budget_minima(
     by_budget: dict[float, list[dict]],
+    loss_key: str = FIT_LOSS_KEY,
 ) -> tuple[list[float], list[float], list[float], list[float], dict]:
     """Fit a parabola per budget and return the valid (C, N_opt, D_opt,
     L_opt) quadruples plus each budget's (a, b, c) fit for plotting --
@@ -117,7 +147,7 @@ def fit_per_budget_minima(
     budgets, n_opts, d_opts, l_opts, parabolas = [], [], [], [], {}
     for c, rows in by_budget.items():
         log_n = [np.log(r["n_params"]) for r in rows]
-        loss = [r["train_loss"] for r in rows]
+        loss = [r[loss_key] for r in rows]
         a, b, coeff_c = fit_isoflop_parabola(log_n, loss)
         parabolas[c] = (a, b, coeff_c)
         try:
@@ -149,6 +179,41 @@ def fit_per_budget_minima(
     return budgets, n_opts, d_opts, l_opts, parabolas
 
 
+def compare_exponents(gap: float, combined_se: float) -> tuple[float, bool | None]:
+    """(gap in sigmas, do the two exponents agree?) -- None when it can't
+    be judged, i.e. a nan SE, which means too few budgets to jackknife one
+    (jackknife_exponent_se) rather than an infinitely significant gap. An
+    SE of exactly 0 does judge the gap -- nothing about it is unknown."""
+    if np.isnan(combined_se):
+        return float("nan"), None
+    if combined_se > 0:
+        sigmas = gap / combined_se
+    else:
+        sigmas = float("inf") if gap > 0 else 0.0
+    return sigmas, bool(sigmas <= EXPONENT_AGREEMENT_SIGMAS)
+
+
+def json_number(x: float) -> float | None:
+    """nan/inf -> None, so fit_summary.json stays valid JSON."""
+    return x if np.isfinite(x) else None
+
+
+def jackknife_exponent_se(budgets: list[float], values: list[float]) -> float:
+    """Leave-one-budget-out standard error of a power-law exponent. The
+    budgets are the unit of resampling because that's what the power law
+    has few of -- 5 here, which is what makes the exponent imprecise.
+    Returns nan below 3 budgets, where leaving one out leaves a 2-point
+    fit with no residual freedom."""
+    if len(budgets) < 3:
+        return float("nan")
+    drops = [
+        fit_power_law([c for j, c in enumerate(budgets) if j != i], [v for j, v in enumerate(values) if j != i])[1]
+        for i in range(len(budgets))
+    ]
+    n = len(drops)
+    return float(np.sqrt((n - 1) / n * np.sum((np.asarray(drops) - np.mean(drops)) ** 2)))
+
+
 def budget_color_map(all_budgets: list[float]) -> dict[float, str]:
     """One fixed color per FLOP budget, keyed by the budget's value -- not
     its position in whatever (possibly filtered) list is being plotted.
@@ -166,7 +231,11 @@ def budget_color_map(all_budgets: list[float]) -> dict[float, str]:
 
 
 def plot_loss_vs_params(
-    by_budget: dict[float, list[dict]], parabolas: dict, bracketed_budgets: set[float], out_path: Path
+    by_budget: dict[float, list[dict]],
+    parabolas: dict,
+    bracketed_budgets: set[float],
+    out_path: Path,
+    loss_key: str = FIT_LOSS_KEY,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -175,7 +244,7 @@ def plot_loss_vs_params(
     for c, rows in by_budget.items():
         color = colors[c]
         ns = [r["n_params"] for r in rows]
-        losses = [r["train_loss"] for r in rows]
+        losses = [r[loss_key] for r in rows]
         ax.scatter(ns, losses, color=color, s=36, zorder=3, label=f"C = {c:.2e} FLOPs")
 
         a, b, coeff_c = parabolas[c]
@@ -192,8 +261,8 @@ def plot_loss_vs_params(
 
     ax.set_xscale("log")
     ax.set_xlabel("model parameters N (log scale)")
-    ax.set_ylabel("final training loss")
-    ax.set_title("IsoFLOP profiles: training loss vs. model size, per FLOP budget")
+    ax.set_ylabel(f"final {LOSS_KEYS[loss_key]} loss")
+    ax.set_title(f"IsoFLOP profiles: {LOSS_KEYS[loss_key]} loss vs. model size, per FLOP budget")
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -210,6 +279,8 @@ def plot_frontier(
     ylabel: str,
     title: str,
     out_path: Path,
+    fit_label: str = "fit",
+    compare: tuple[list[float], list[float], tuple[float, float], str] | None = None,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -220,7 +291,24 @@ def plot_frontier(
 
     x_line = np.geomspace(min(budgets), max(final_flops, max(budgets)) * 1.2, 200)
     y_line = coeff * x_line**exponent
-    ax.plot(x_line, y_line, color=FIT_LINE_COLOR, linestyle="--", linewidth=1.5, zorder=2, label=f"fit: {exponent:.3f} power law")
+    ax.plot(x_line, y_line, color=FIT_LINE_COLOR, linestyle="--", linewidth=1.5, zorder=2, label=f"{fit_label}: {exponent:.3f} power law")
+
+    # Second loss on the same axes, hollow and dotted against the primary's
+    # filled markers: the two exponents agreeing is the cross-check this
+    # script prints in sigmas, and one figure shows it directly.
+    if compare is not None:
+        cmp_budgets, cmp_values, (cmp_coeff, cmp_exponent), cmp_label = compare
+        for c, v in zip(cmp_budgets, cmp_values):
+            ax.scatter([c], [v], facecolor="none", edgecolor=colors[c], s=70, linewidth=1.4, zorder=3)
+        ax.plot(
+            x_line,
+            cmp_coeff * x_line**cmp_exponent,
+            color=FIT_LINE_COLOR,
+            linestyle=":",
+            linewidth=1.5,
+            zorder=2,
+            label=f"{cmp_label} fit: {cmp_exponent:.3f} power law",
+        )
 
     ax.scatter([final_flops], [final_value], color=FIT_LINE_COLOR, s=140, marker="*", edgecolor="black", linewidth=0.8, zorder=4, label=f"final run (C={final_flops:.2e})")
 
@@ -274,8 +362,8 @@ def main() -> None:
     if repeated:
         print(
             f"  {len(repeated)} cell(s) have repeats -- fitting their mean loss; "
-            f"per-cell run-to-run std: {min(r['train_loss_std'] for r in repeated):.4f}-"
-            f"{max(r['train_loss_std'] for r in repeated):.4f}"
+            f"per-cell run-to-run std: {min(r['loss_std'] for r in repeated):.4f}-"
+            f"{max(r['loss_std'] for r in repeated):.4f}"
         )
     embed_fracs = [1 - r["n_params_non_embedding"] / r["n_params"] for r in all_rows]
     print(
@@ -291,16 +379,84 @@ def main() -> None:
         if dropped:
             print(f"Dropped {len(dropped)} budget(s) below --min-flops-budget={args.min_flops_budget:.3e}: {dropped}")
 
-    budgets, n_opts, d_opts, l_opts, parabolas = fit_per_budget_minima(by_budget)
-    if len(budgets) < 2:
-        raise SystemExit(
-            f"Only {len(budgets)} budget(s) yielded a valid parabola minimum -- need at least 2 to fit a "
-            "power law. Widen the model-size grid (scripts/isoflop_sweep.py --widths) for the excluded "
-            "budget(s) and re-run the sweep."
+    # Fit both losses. FIT_LOSS_KEY's fit is the one reported and used for
+    # the recommendation; the other is a cross-check (see LOSS_KEYS).
+    fits = {}
+    for loss_key, label in LOSS_KEYS.items():
+        print(f"\nFitting {label} loss:")
+        b, n, d, l, par = fit_per_budget_minima(by_budget, loss_key)
+        if len(b) < 2:
+            raise SystemExit(
+                f"Only {len(b)} budget(s) yielded a valid {label}-loss parabola minimum -- need at least 2 "
+                "to fit a power law. Widen the model-size grid (scripts/isoflop_sweep.py --widths) for the "
+                "excluded budget(s) and re-run the sweep."
+            )
+        fits[loss_key] = {
+            "budgets": b,
+            "n_opts": n,
+            "d_opts": d,
+            "l_opts": l,
+            "parabolas": par,
+            "n_fit": fit_power_law(b, n),
+            "d_fit": fit_power_law(b, d),
+            "l_fit": fit_power_law(b, l),
+            "n_exponent_se": jackknife_exponent_se(b, n),
+        }
+        print(
+            f"  N_opt(C) = {fits[loss_key]['n_fit'][0]:.4g} * C^{fits[loss_key]['n_fit'][1]:.4f} "
+            f"(exponent SE +-{fits[loss_key]['n_exponent_se']:.4f} over {len(b)} budgets)"
         )
 
-    n_fit = fit_power_law(budgets, n_opts)
-    d_fit = fit_power_law(budgets, d_opts)
+    primary = fits[FIT_LOSS_KEY]
+    other_key = next(k for k in LOSS_KEYS if k != FIT_LOSS_KEY)
+    other = fits[other_key]
+    budgets, n_opts, d_opts, l_opts, parabolas = (
+        primary["budgets"],
+        primary["n_opts"],
+        primary["d_opts"],
+        primary["l_opts"],
+        primary["parabolas"],
+    )
+
+    # N_opt(C)'s exponent is beta/(alpha+beta) under Chinchilla's
+    # L(N,D) = E + A/N^alpha + B/D^beta -- it depends on the loss surface's
+    # *curvature* in N vs D, not its level, so two losses over the same
+    # distribution should agree even at very different absolute losses.
+    # Single-epoch training (no token is repeated) removes the memorization
+    # gap too, so training loss here is already close to a held-out
+    # estimate. A gap that survives the noise check therefore points at the
+    # two losses measuring different distributions.
+    exponents = {k: v["n_fit"][1] for k, v in fits.items()}
+    exponent_gap = abs(exponents["val_loss"] - exponents["train_loss"])
+    combined_se = float(np.hypot(fits["val_loss"]["n_exponent_se"], fits["train_loss"]["n_exponent_se"]))
+    sigmas, agree = compare_exponents(exponent_gap, combined_se)
+    print(
+        f"\nN_opt(C) exponent: {exponents['val_loss']:.4f} (validation) vs "
+        f"{exponents['train_loss']:.4f} (training), gap {exponent_gap:.4f}"
+        + ("" if agree is None else f" = {sigmas:.1f} sigma (combined SE {combined_se:.4f})")
+    )
+    if agree is None:
+        print(
+            f"  Agreement not checked: {len(budgets)} budget(s) is too few to estimate the exponents' own "
+            "error, and the gap only means something against it. Add FLOP budgets."
+        )
+    elif agree:
+        print(f"  Consistent within noise at {EXPONENT_AGREEMENT_SIGMAS} sigma.")
+    else:
+        print(
+            f"  WARNING: the two exponents differ by more than {EXPONENT_AGREEMENT_SIGMAS} sigma. Over one "
+            "distribution they should agree, so check whether train and val are actually the same corpus "
+            "(data_dir's meta.json val_source) before trusting the extrapolation below."
+        )
+    if not np.isnan(combined_se) and combined_se > 0.05:
+        print(
+            f"  NOTE: the exponent itself is only determined to +-{combined_se / np.sqrt(2):.2f} here -- add "
+            "FLOP budgets (not widths) to tighten it; the power law has only "
+            f"{len(budgets)} points."
+        )
+
+    n_fit = primary["n_fit"]
+    d_fit = primary["d_fit"]
     # L_opt(C) = l_coeff * C^l_exp -- same log-log linear regression as
     # N_opt/D_opt (fit_power_law), through each budget's parabola-vertex
     # *loss* rather than its shape. Unlike N_opt/D_opt this isn't the
@@ -312,7 +468,7 @@ def main() -> None:
     # exactly, but will extrapolate toward 0 loss at large C and shouldn't
     # be trusted far past the sampled budgets -- treat l_final below as a
     # rough, order-of-magnitude check, not a precise prediction.
-    l_coeff, l_exp = fit_power_law(budgets, l_opts)
+    l_coeff, l_exp = primary["l_fit"]
     n_final, d_final = optimal_params_and_tokens(args.final_flops_budget, n_fit, d_fit)
     l_final = l_coeff * args.final_flops_budget**l_exp
     recommended_width = nearest_width_for_params(n_final, args.vocab_size, args.block_size)
@@ -323,7 +479,7 @@ def main() -> None:
     print(f"Fitted L_opt(C) = {l_coeff:.4g} * C^{l_exp:.4f}  (no irreducible-loss floor -- rough extrapolation only)")
     print(f"\nAt --final-flops-budget={args.final_flops_budget:.3e}:")
     print(f"  N_opt ~= {n_final:,.0f} params, D_opt ~= {d_final:,.0f} tokens")
-    print(f"  L_opt ~= {l_final:.4f} (final training loss)")
+    print(f"  L_opt ~= {l_final:.4f} (final {FIT_LOSS_LABEL} loss)")
     print(f"  nearest feasible shape: n_layer={n_layer}, n_head={n_head}, n_embd={n_embd}")
 
     summary = {
@@ -332,10 +488,28 @@ def main() -> None:
         "n_budgets_total": len(by_budget),
         "n_cells": len(all_rows),
         "n_runs": n_runs,
+        "fit_loss": FIT_LOSS_KEY,
         "embedding_share_of_n": {"min": min(embed_fracs), "max": max(embed_fracs)},
         "n_opt_fit": {"coefficient": n_fit[0], "exponent": n_fit[1]},
         "d_opt_fit": {"coefficient": d_fit[0], "exponent": d_fit[1]},
         "l_opt_fit": {"coefficient": l_coeff, "exponent": l_exp},
+        # Both losses' fits, so the val-vs-train agreement is auditable
+        # from the summary alone rather than only from stdout.
+        "fits_by_loss": {
+            k: {
+                "n_budgets_used": len(v["budgets"]),
+                "n_opt_fit": {"coefficient": v["n_fit"][0], "exponent": v["n_fit"][1]},
+                "d_opt_fit": {"coefficient": v["d_fit"][0], "exponent": v["d_fit"][1]},
+                "l_opt_fit": {"coefficient": v["l_fit"][0], "exponent": v["l_fit"][1]},
+                "n_opt_exponent_se": json_number(v["n_exponent_se"]),
+            }
+            for k, v in fits.items()
+        },
+        "n_opt_exponent_gap": exponent_gap,
+        # null, not NaN: json.dump would emit a bare NaN literal, which is
+        # not valid JSON and breaks any non-Python reader of this file.
+        "n_opt_exponent_gap_sigmas": json_number(sigmas),
+        "n_opt_exponents_agree": agree,
         "final_flops_budget": args.final_flops_budget,
         "n_opt_at_final_budget": n_final,
         "d_opt_at_final_budget": d_final,
@@ -347,7 +521,17 @@ def main() -> None:
     print(f"Wrote {summary_path}")
 
     colors = budget_color_map(list(by_budget))
-    plot_loss_vs_params(by_budget, parabolas, set(budgets), args.out_dir / "isoflop_loss_curves.png")
+    # One IsoFLOP-profile plot per loss; the frontier plots below stay on
+    # the primary loss, since that's what the recommendation comes from.
+    for loss_key, fit in fits.items():
+        suffix = "" if loss_key == FIT_LOSS_KEY else f"_{LOSS_KEYS[loss_key]}"
+        plot_loss_vs_params(
+            by_budget,
+            fit["parabolas"],
+            set(fit["budgets"]),
+            args.out_dir / f"isoflop_loss_curves{suffix}.png",
+            loss_key,
+        )
     plot_frontier(
         budgets,
         n_opts,
@@ -377,9 +561,11 @@ def main() -> None:
         (l_coeff, l_exp),
         args.final_flops_budget,
         l_final,
-        ylabel="optimal training loss L_opt (log scale)",
-        title="Compute-optimal training loss vs. FLOPs budget",
+        ylabel="optimal loss L_opt (log scale)",
+        title=f"Compute-optimal loss vs. FLOPs budget ({FIT_LOSS_LABEL} vs. {LOSS_KEYS[other_key]})",
         out_path=args.out_dir / "isoflop_loss_vs_flops.png",
+        fit_label=FIT_LOSS_LABEL + " fit",
+        compare=(other["budgets"], other["l_opts"], other["l_fit"], LOSS_KEYS[other_key]),
     )
 
 
