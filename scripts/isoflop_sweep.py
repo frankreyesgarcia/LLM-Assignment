@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.model.gpt import GPT, GPTConfig
 from src.model.scaling import gpt_shape_for_width, max_iters_for_budget, tokens_for_budget
-from src.model.train import TrainConfig, train_model
+from src.model.train import DEFAULT_VAL_BIN, TrainConfig, train_model
 from src.tokenizer.logging_utils import tee_to_log
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -211,6 +211,7 @@ def run_cell(
     width: int,
     vocab_size: int,
     data_dir: Path,
+    val_bin: str,
     block_size: int,
     batch_size: int,
     eval_iters: int,
@@ -248,6 +249,7 @@ def run_cell(
     cfg = TrainConfig(
         data_dir=data_dir,
         out_dir=None,
+        val_bin=val_bin,
         block_size=block_size,
         batch_size=batch_size,
         n_layer=n_layer,
@@ -296,6 +298,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "artifacts" / "isoflop_sweep")
     parser.add_argument("--flop-budgets", type=float, nargs="+", default=DEFAULT_FLOP_BUDGETS)
     parser.add_argument("--widths", type=int, nargs="+", default=DEFAULT_WIDTHS)
+    parser.add_argument(
+        "--val-bin",
+        default=DEFAULT_VAL_BIN,
+        help=f"Validation token file inside --data-dir (default {DEFAULT_VAL_BIN}; see src/model/train.py).",
+    )
     parser.add_argument("--block-size", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--eval-iters", type=int, default=10)
@@ -331,7 +338,11 @@ def main(args: argparse.Namespace) -> None:
     if len(devices) > 1 and "auto" in devices:
         raise ValueError("--devices must list explicit devices (e.g. cuda:0 cuda:1 ...), not 'auto', when using more than one")
 
-    vocab_size = json.loads((args.data_dir / "meta.json").read_text())["vocab_size"]
+    meta = json.loads((args.data_dir / "meta.json").read_text())
+    vocab_size = meta["vocab_size"]
+    # The fitted law is only as meaningful as the split it's fit on, so
+    # say which one this was up front rather than leaving it to the flag.
+    print(f"Validation set: {args.data_dir / args.val_bin} (meta.json val_source: {meta.get('val_source', 'unset')})")
     completed = load_completed_cells(csv_path)
 
     grid = build_grid(args.flop_budgets, args.widths, vocab_size, args.block_size, args.batch_size)
@@ -345,6 +356,7 @@ def main(args: argparse.Namespace) -> None:
     common_kwargs = dict(
         vocab_size=vocab_size,
         data_dir=args.data_dir,
+        val_bin=args.val_bin,
         block_size=args.block_size,
         batch_size=args.batch_size,
         eval_iters=args.eval_iters,
