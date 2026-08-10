@@ -42,7 +42,6 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_commo
 
 uv run scripts/download_sources.py \
     --out-dir "$PROJECT_STORAGE/data/raw" \
-    --max-workers 16 \
-    2>&1 | tee "$LOG_DIR/download_sources.log"
+    --max-workers 16
 
 echo "Raw files under: $PROJECT_STORAGE/data/raw"

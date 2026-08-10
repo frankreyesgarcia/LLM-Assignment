@@ -45,7 +45,6 @@ uv run scripts/train_tokenizer.py \
     --processed-dir "$PROJECT_STORAGE/data/processed" \
     --vocab-size 32000 \
     --limit-docs 500000 \
-    --out-dir "$PROJECT_STORAGE/artifacts/tokenizer" \
-    2>&1 | tee "$LOG_DIR/train_tokenizer.log"
+    --out-dir "$PROJECT_STORAGE/artifacts/tokenizer"
 
 echo "Tokenizer saved under: $PROJECT_STORAGE/artifacts/tokenizer"

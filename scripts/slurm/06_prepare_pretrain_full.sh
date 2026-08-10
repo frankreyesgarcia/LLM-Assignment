@@ -73,7 +73,6 @@ uv run scripts/prepare_pretrain_data_streaming.py \
     --local-dir "$PROJECT_STORAGE/data/pretrain_source" \
     --tokenizer-dir "$SOURCE_STORAGE/artifacts/tokenizer" \
     --out-dir "$PROJECT_STORAGE/data/pretrain_full" \
-    --val-shards-per-lang 2 \
-    2>&1 | tee "$LOG_DIR/prepare_pretrain_full.log"
+    --val-shards-per-lang 2
 
 echo "Tokenized corpus under: $PROJECT_STORAGE/data/pretrain_full"

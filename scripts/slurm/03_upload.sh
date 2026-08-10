@@ -32,6 +32,5 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_commo
 
 uv run scripts/upload_to_hf.py \
     --repo-id "$REPO_ID" \
-    --local-dir "$PROJECT_STORAGE/data/final" \
-    2>&1 | tee "$LOG_DIR/upload.log"
+    --local-dir "$PROJECT_STORAGE/data/final"
     # add --public to publish openly; omitted here so private is the default
