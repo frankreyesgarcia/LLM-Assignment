@@ -33,8 +33,10 @@ import numpy as np
 # matmul -- see GPT.num_params(non_embedding=False), src/model/gpt.py.
 FLOPS_PER_PARAM_TOKEN = 6
 
-# Attention head size (n_embd / n_head), held fixed across the whole
-# IsoFLOP width grid. Not a derived constant -- it's the convention all
+# Target attention head size (n_embd / n_head) across the IsoFLOP width
+# grid -- widths that can't hit it exactly get the closest achievable head
+# size instead (see gpt_shape_for_width).
+# Not a derived constant -- it's the convention all
 # four official GPT-2 variants use (768/12, 1024/16, 1280/20, 1600/25 all
 # = 64) and GPT-3's smaller variants keep too, though not held rigidly at
 # the largest scale (full GPT-3-175B grows head size to 128 instead --
@@ -106,9 +108,8 @@ def gpt_shape_for_width(n_embd: int) -> tuple[int, int, int]:
 
     Width is the one knob scripts/isoflop_sweep.py varies to sweep model
     size; head count and depth are both derived from it, but on different
-    curves: n_head = n_embd // WIDTH_HEAD_DIM keeps head *size* fixed at
-    WIDTH_HEAD_DIM once there's enough width for it (standard GPT
-    convention), while n_layer =
+    curves: n_head keeps head *size* as close to WIDTH_HEAD_DIM as the
+    width allows (standard GPT convention), while n_layer =
     ANCHOR_LAYER * (n_embd / ANCHOR_WIDTH) ** DEPTH_WIDTH_EXPONENT grows
     *slower* than width (DEPTH_WIDTH_EXPONENT < 1) and is anchored to pass
     exactly through the real run's own (n_layer=8, n_embd=512) point. So
@@ -118,22 +119,18 @@ def gpt_shape_for_width(n_embd: int) -> tuple[int, int, int]:
     GPT-2/GPT-3 family scales (see DEPTH_WIDTH_EXPONENT) instead of
     holding it fixed.
 
-    Below WIDTH_HEAD_DIM there isn't enough width for even one
-    WIDTH_HEAD_DIM-sized head, so n_head drops to 1 (a single head over
-    fewer than WIDTH_HEAD_DIM channels) instead of enforcing n_embd as a
-    multiple of WIDTH_HEAD_DIM -- letting the sweep reach small-N cells
-    that bracket the low-compute budgets' (smaller) optimum.
+    n_head is the divisor of n_embd whose head size lands nearest
+    WIDTH_HEAD_DIM (ties go to the larger head count), which reduces to
+    exactly n_embd // WIDTH_HEAD_DIM for multiples of it and to 1 below
+    it. Widths in between are allowed rather than rejected so the sweep
+    can sample the parabola vertex densely -- at 64-spacing the vertex
+    band (widths 32-192) only gets a handful of points, and a coarse
+    vertex is what destabilizes the fitted minimum.
     """
     if n_embd < 1:
         raise ValueError(f"n_embd={n_embd} must be >= 1")
-    if n_embd >= WIDTH_HEAD_DIM:
-        if n_embd % WIDTH_HEAD_DIM != 0:
-            raise ValueError(
-                f"n_embd={n_embd} must be a multiple of WIDTH_HEAD_DIM={WIDTH_HEAD_DIM} once n_embd >= WIDTH_HEAD_DIM"
-            )
-        n_head = n_embd // WIDTH_HEAD_DIM
-    else:
-        n_head = 1
+    divisors = [h for h in range(1, n_embd + 1) if n_embd % h == 0]
+    n_head = min(divisors, key=lambda h: (abs(n_embd / h - WIDTH_HEAD_DIM), -h))
     n_layer = max(1, round(ANCHOR_LAYER * (n_embd / ANCHOR_WIDTH) ** DEPTH_WIDTH_EXPONENT))
     return n_layer, n_head, n_embd
 

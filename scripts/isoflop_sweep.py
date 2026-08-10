@@ -19,8 +19,12 @@ Model width is the only knob varied -- see
 src/model/scaling.py::gpt_shape_for_width for why n_layer/n_head are
 derived from it instead of chosen independently.
 
-Writes one CSV row per completed cell, flushed immediately (crash/
-timeout-safe) and skips cells already present on a re-run (resumable) --
+Each (budget, width) cell can be trained more than once at different seeds
+(--repeats) to average out run-to-run noise; the fit script averages a
+cell's repeats before fitting.
+
+Writes one CSV row per completed run, flushed immediately (crash/
+timeout-safe) and skips runs already present on a re-run (resumable) --
 same shape of concern as a multi-hour SLURM job as scripts/
 run_dedup_datatrove.py's --limit smoke-test-first pattern, just resumed
 via the CSV instead of a --limit flag.
@@ -36,7 +40,7 @@ Usage:
         --out-dir artifacts/isoflop_sweep
 
     # Same sweep, spread across 4 GPUs (one cell per GPU at a time) instead
-    # of one GPU running all 65 cells back to back -- see --devices below.
+    # of one GPU running every cell back to back -- see --devices below.
     uv run scripts/isoflop_sweep.py --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
         --out-dir artifacts/isoflop_sweep --devices cuda:0 cuda:1 cuda:2 cuda:3
 """
@@ -61,16 +65,17 @@ from src.tokenizer.logging_utils import tee_to_log
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# 15 candidate widths (was 13, before that 5): denser throughout, and now
-# reaching below WIDTH_HEAD_DIM=64 (4/8/16/32/48, n_head=1 there -- see
-# src/model/scaling.py::gpt_shape_for_width) instead of stopping at 64,
-# since a coarse grid -- especially its old single jump from 192 straight
-# to 384 -- was flattening out the low-N side of several budgets' loss-
-# vs-params parabolas. "Candidate" because, unlike the previous grid, not
-# every width is actually run at every budget -- see MIN/MAX_ITERS_PER_CELL
-# and build_grid() below for why a single shared width list per budget
-# stops making sense once it reaches this wide.
-DEFAULT_WIDTHS = [4, 8, 16, 32, 48, 64, 128, 192, 256, 320, 384, 448, 512, 640, 768]
+# 23 candidate widths (was 15, before that 13, before that 5). The extra
+# 8 all land in the 24-224 band, where every budget's parabola vertex
+# actually sits: at the old 64-spacing that band stepped N by up to 2.2x
+# per width (64->128), leaving only 2-3 points within 2x of the fitted
+# minimum, and dropping any one of them moved N_opt by up to 3.3x. The new
+# band steps ~1.2-1.3x. Widths that aren't multiples of 64 take the
+# nearest achievable head size (src/model/scaling.py::gpt_shape_for_width);
+# every width that was already here keeps its old shape exactly.
+# "Candidate" because not every width runs at every budget -- see
+# MIN/MAX_ITERS_PER_CELL and build_grid().
+DEFAULT_WIDTHS = [4, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768]
 
 # A cell's max_iters = D/(batch_size*block_size) = C/(6*N*batch_size*block_size)
 # falls out of (C, width) once both are fixed -- so widening DEFAULT_WIDTHS
@@ -118,6 +123,7 @@ DEFAULT_FLOP_BUDGETS = [1e14, 3.16e14, 1e15, 1.78e15, 3.16e15]
 FIELDNAMES = [
     "flops_budget",
     "width",
+    "seed",
     "n_layer",
     "n_head",
     "n_embd",
@@ -131,14 +137,23 @@ FIELDNAMES = [
 ]
 
 
-def load_completed_cells(csv_path: Path) -> dict[tuple[float, int], float]:
-    """Already-trained cells -> their elapsed_s. Keys drive the resume skip;
-    the values let the end-of-sweep summary report a total that spans
-    earlier invocations too, not just this one's cells."""
+def load_completed_cells(csv_path: Path) -> dict[tuple[float, int, int], float]:
+    """Already-trained (budget, width, seed) cells -> their elapsed_s. Keys
+    drive the resume skip; the values let the end-of-sweep summary report a
+    total that spans earlier invocations too, not just this one's cells."""
     if not csv_path.exists():
         return {}
     with open(csv_path, newline="") as f:
-        return {(float(row["flops_budget"]), int(row["width"])): float(row["elapsed_s"]) for row in csv.DictReader(f)}
+        reader = csv.DictReader(f)
+        if reader.fieldnames is not None and reader.fieldnames != FIELDNAMES:
+            raise ValueError(
+                f"{csv_path} has header {reader.fieldnames}, but this version writes {FIELDNAMES}. Appending "
+                "to it would misalign every new row -- point --out-dir at a new directory."
+            )
+        return {
+            (float(row["flops_budget"]), int(row["width"]), int(row["seed"])): float(row["elapsed_s"])
+            for row in reader
+        }
 
 
 def format_duration(seconds: float) -> str:
@@ -274,6 +289,7 @@ def run_cell(
     return {
         "flops_budget": flops_budget,
         "width": width,
+        "seed": seed,
         "n_layer": n_layer,
         "n_head": n_head,
         "n_embd": n_embd,
@@ -326,7 +342,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "to the same cuda:0 in every worker and contend for one GPU."
         ),
     )
-    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--seed", type=int, default=1337, help="Base seed; repeat i of a cell runs at --seed + i.")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help=(
+            "Independent training runs per (budget, width) cell, each at its own seed (default 1, as in both "
+            "earlier sweeps). scripts/fit_isoflop_scaling_law.py averages a cell's repeats before fitting, so "
+            "k of them cut run-to-run noise (~0.07 loss in v2) by ~sqrt(k) for k times the compute. Repeats "
+            "resume into an existing CSV, so this can be raised after the fact."
+        ),
+    )
     return parser
 
 
@@ -345,10 +372,16 @@ def main(args: argparse.Namespace) -> None:
     print(f"Validation set: {args.data_dir / args.val_bin} (meta.json val_source: {meta.get('val_source', 'unset')})")
     completed = load_completed_cells(csv_path)
 
-    grid = build_grid(args.flop_budgets, args.widths, vocab_size, args.block_size, args.batch_size)
-    todo = [(c, w) for c, w in grid if (c, w) not in completed]
+    if args.repeats < 1:
+        raise ValueError(f"--repeats must be >= 1, got {args.repeats}")
+    seeds = [args.seed + i for i in range(args.repeats)]
+
+    cells = build_grid(args.flop_budgets, args.widths, vocab_size, args.block_size, args.batch_size)
+    grid = [(c, w, s) for c, w in cells for s in seeds]
+    todo = [cell for cell in grid if cell not in completed]
     print(
-        f"IsoFLOP sweep: {len(grid)} cells ({len(args.flop_budgets)} budgets, {len(args.widths)} candidate widths each, "
+        f"IsoFLOP sweep: {len(cells)} cells x {args.repeats} seed(s) = {len(grid)} runs "
+        f"({len(args.flop_budgets)} budgets, {len(args.widths)} candidate widths each, "
         f"per-budget max_iters window [{MIN_ITERS_PER_CELL}, {MAX_ITERS_PER_CELL}]), "
         f"{len(completed)} already done, {len(todo)} to run -> {csv_path} (devices={devices})"
     )
@@ -364,7 +397,6 @@ def main(args: argparse.Namespace) -> None:
         min_lr=args.min_lr,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
-        seed=args.seed,
     )
 
     sweep_start = time.time()
@@ -374,9 +406,9 @@ def main(args: argparse.Namespace) -> None:
     compute_s = 0.0
 
     if len(devices) == 1:
-        for i, (flops_budget, width) in enumerate(todo, 1):
-            print(f"[{i}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} ...")
-            row = run_cell(flops_budget=flops_budget, width=width, device=devices[0], **common_kwargs)
+        for i, (flops_budget, width, seed) in enumerate(todo, 1):
+            print(f"[{i}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} seed={seed} ...")
+            row = run_cell(flops_budget=flops_budget, width=width, seed=seed, device=devices[0], **common_kwargs)
             append_row(csv_path, row)
             compute_s += row["elapsed_s"]
             print(
@@ -395,26 +427,26 @@ def main(args: argparse.Namespace) -> None:
             futures = {
                 pool.submit(
                     _run_cell_task,
-                    dict(flops_budget=c, width=w, device=devices[i % len(devices)], **common_kwargs),
-                ): (c, w)
-                for i, (c, w) in enumerate(todo)
+                    dict(flops_budget=c, width=w, seed=s, device=devices[i % len(devices)], **common_kwargs),
+                ): (c, w, s)
+                for i, (c, w, s) in enumerate(todo)
             }
             for n_done, future in enumerate(as_completed(futures), 1):
-                flops_budget, width = futures[future]
+                flops_budget, width, seed = futures[future]
                 row = future.result()
                 append_row(csv_path, row)
                 compute_s += row["elapsed_s"]
                 print(
-                    f"[{n_done}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} "
+                    f"[{n_done}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} seed={seed} "
                     f"n_params={row['n_params']:,} max_iters={row['max_iters']:,} "
                     f"train_loss={row['final_train_loss']:.4f} val_loss={row['final_val_loss']:.4f} "
                     f"({row['elapsed_s']:.1f}s, {format_duration(compute_s)} cumulative)"
                 )
 
     wall_s = time.time() - sweep_start
-    print(f"Done. {len(grid)} cells total in {csv_path}")
+    print(f"Done. {len(grid)} run(s) across {len(cells)} cell(s) in {csv_path}")
     print(
-        f"  {len(todo)} cell(s) this invocation: {format_duration(compute_s)} of training time "
+        f"  {len(todo)} run(s) this invocation: {format_duration(compute_s)} of training time "
         f"across {len(devices)} device(s), {format_duration(wall_s)} wall-clock"
         # Perfect overlap would put compute_s at len(devices)*wall_s; the
         # shortfall is idle GPUs (stragglers at the tail, startup) plus the
@@ -424,9 +456,9 @@ def main(args: argparse.Namespace) -> None:
     if completed:
         # Resumed run: this invocation's total leaves out whatever earlier
         # ones already paid for, so report the whole grid's cost as well.
-        grid_cells = set(grid)
-        grid_total_s = sum(elapsed for cell, elapsed in load_completed_cells(csv_path).items() if cell in grid_cells)
-        print(f"  {len(grid)} cell(s) including earlier invocations: {format_duration(grid_total_s)} of training time")
+        grid_runs = set(grid)
+        grid_total_s = sum(elapsed for run, elapsed in load_completed_cells(csv_path).items() if run in grid_runs)
+        print(f"  {len(grid)} run(s) including earlier invocations: {format_duration(grid_total_s)} of training time")
 
 
 if __name__ == "__main__":
