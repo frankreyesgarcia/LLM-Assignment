@@ -25,6 +25,12 @@ same shape of concern as a multi-hour SLURM job as scripts/
 run_dedup_datatrove.py's --limit smoke-test-first pattern, just resumed
 via the CSV instead of a --limit flag.
 
+Also saves each cell's fully-trained final checkpoint (weights + config,
+src/model/train.py::train_model's ckpt_final.pt) under
+--out-dir/checkpoints/<cell>/ -- one per (flops_budget, width) grid point,
+path recorded in the CSV's checkpoint_path column. Pass --no-checkpoints
+to skip this (e.g. for a throwaway smoke test).
+
 Usage:
     # Local smoke test (small grid, cheap even on CPU) before the real sweep:
     uv run scripts/isoflop_sweep.py --data-dir /path/to/pretrain_full \
@@ -128,7 +134,17 @@ FIELDNAMES = [
     "final_train_loss",
     "final_val_loss",
     "elapsed_s",
+    "checkpoint_path",
 ]
+
+
+def checkpoint_dir_for_cell(checkpoints_dir: Path, flops_budget: float, width: int) -> Path:
+    """Where a cell's final checkpoint (src/model/train.py's ckpt_final.pt)
+    lands -- one subdirectory per (flops_budget, width) cell, named the same
+    way results.csv identifies it, so a row's checkpoint is easy to find by
+    eye.
+    """
+    return checkpoints_dir / f"flops_budget={flops_budget:.3e}_width={width}"
 
 
 def load_completed_cells(csv_path: Path) -> dict[tuple[float, int], float]:
@@ -220,6 +236,7 @@ def run_cell(
     grad_clip: float,
     device: str,
     seed: int,
+    checkpoint_dir: Path | None = None,
 ) -> dict:
     n_layer, n_head, n_embd = gpt_shape_for_width(width)
     model = GPT(GPTConfig(vocab_size=vocab_size, block_size=block_size, n_layer=n_layer, n_head=n_head, n_embd=n_embd))
@@ -247,7 +264,7 @@ def run_cell(
 
     cfg = TrainConfig(
         data_dir=data_dir,
-        out_dir=None,
+        out_dir=checkpoint_dir,
         block_size=block_size,
         batch_size=batch_size,
         n_layer=n_layer,
@@ -282,6 +299,7 @@ def run_cell(
         "final_train_loss": result["final_train_loss"],
         "final_val_loss": result["final_val_loss"],
         "elapsed_s": elapsed,
+        "checkpoint_path": str(checkpoint_dir / "ckpt_final.pt") if checkpoint_dir is not None else "",
     }
 
 
@@ -320,6 +338,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--no-checkpoints",
+        dest="save_checkpoints",
+        action="store_false",
+        help="Skip saving each cell's final checkpoint (src/model/train.py's ckpt_final.pt) under "
+        "--out-dir/checkpoints/ -- e.g. for a quick smoke test where the weights aren't needed.",
+    )
     return parser
 
 
@@ -330,6 +355,8 @@ def main(args: argparse.Namespace) -> None:
     devices = args.devices if args.devices else [args.device]
     if len(devices) > 1 and "auto" in devices:
         raise ValueError("--devices must list explicit devices (e.g. cuda:0 cuda:1 ...), not 'auto', when using more than one")
+
+    checkpoints_dir = args.out_dir / "checkpoints" if args.save_checkpoints else None
 
     vocab_size = json.loads((args.data_dir / "meta.json").read_text())["vocab_size"]
     completed = load_completed_cells(csv_path)
@@ -364,7 +391,12 @@ def main(args: argparse.Namespace) -> None:
     if len(devices) == 1:
         for i, (flops_budget, width) in enumerate(todo, 1):
             print(f"[{i}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} ...")
-            row = run_cell(flops_budget=flops_budget, width=width, device=devices[0], **common_kwargs)
+            checkpoint_dir = (
+                checkpoint_dir_for_cell(checkpoints_dir, flops_budget, width) if checkpoints_dir is not None else None
+            )
+            row = run_cell(
+                flops_budget=flops_budget, width=width, device=devices[0], checkpoint_dir=checkpoint_dir, **common_kwargs
+            )
             append_row(csv_path, row)
             compute_s += row["elapsed_s"]
             print(
@@ -383,7 +415,13 @@ def main(args: argparse.Namespace) -> None:
             futures = {
                 pool.submit(
                     _run_cell_task,
-                    dict(flops_budget=c, width=w, device=devices[i % len(devices)], **common_kwargs),
+                    dict(
+                        flops_budget=c,
+                        width=w,
+                        device=devices[i % len(devices)],
+                        checkpoint_dir=(checkpoint_dir_for_cell(checkpoints_dir, c, w) if checkpoints_dir is not None else None),
+                        **common_kwargs,
+                    ),
                 ): (c, w)
                 for i, (c, w) in enumerate(todo)
             }

@@ -282,6 +282,24 @@ def train_model(cfg: TrainConfig) -> dict:
 
         final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
         elapsed_s = time.time() - start
+        if out_dir is not None:
+            # Unconditional, unlike the mid-training "best val loss so far"
+            # save above -- callers that only ever care about the fully
+            # trained model (e.g. isoflop_sweep.py's per-cell checkpoints)
+            # need this exact final state even when a noisier earlier eval
+            # happened to score a lower val_loss (short cells especially:
+            # only two evals total, at it=0 and it=max_iters-1, so "best"
+            # there is not a meaningful signal).
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "model_cfg": model_cfg,
+                    "iter_num": cfg.max_iters - 1,
+                    "final_train_loss": final["train"],
+                    "final_val_loss": final["val"],
+                },
+                out_dir / "ckpt_final.pt",
+            )
         if wandb_run is not None:
             wandb_run.summary["final_train_loss"] = final["train"]
             wandb_run.summary["final_val_loss"] = final["val"]
