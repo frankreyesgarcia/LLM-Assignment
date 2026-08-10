@@ -140,10 +140,21 @@ FIELDNAMES = [
 
 def checkpoint_dir_for_cell(checkpoints_dir: Path, flops_budget: float, width: int) -> Path:
     """Where a cell's final checkpoint (src/model/train.py's ckpt_final.pt)
-    lands -- one subdirectory per (flops_budget, width) cell. The directory name
-    uses scientific notation for flops_budget so it stays compact and stable.
+    lands -- one subdirectory per (flops_budget, width) cell, named the same
+    way results.csv identifies it, so a row's checkpoint is easy to find by
+    eye.
+
+    flops_budget/width only ever reach here as argparse-parsed float/int
+    (--flop-budgets/--widths), so a path-traversal segment can't actually
+    occur -- but the containment check below makes that guarantee explicit
+    and load-bearing (rather than implicit in argparse's parsing) in case a
+    future caller ever passes these through some other, less trusted route.
     """
-    return checkpoints_dir / f"flops_budget={flops_budget:.3e}_width={width}"
+    cell_dir = checkpoints_dir / f"flops_budget={flops_budget:.3e}_width={width}"
+    resolved, resolved_root = cell_dir.resolve(), checkpoints_dir.resolve()
+    if not resolved.is_relative_to(resolved_root):
+        raise ValueError(f"checkpoint dir {resolved} escapes checkpoints_dir {resolved_root}")
+    return cell_dir
 
 
 def load_completed_cells(csv_path: Path) -> dict[tuple[float, int], float]:
