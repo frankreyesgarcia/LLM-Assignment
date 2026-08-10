@@ -140,9 +140,8 @@ FIELDNAMES = [
 
 def checkpoint_dir_for_cell(checkpoints_dir: Path, flops_budget: float, width: int) -> Path:
     """Where a cell's final checkpoint (src/model/train.py's ckpt_final.pt)
-    lands -- one subdirectory per (flops_budget, width) cell, named the same
-    way results.csv identifies it, so a row's checkpoint is easy to find by
-    eye.
+    lands -- one subdirectory per (flops_budget, width) cell. The directory name
+    uses scientific notation for flops_budget so it stays compact and stable.
     """
     return checkpoints_dir / f"flops_budget={flops_budget:.3e}_width={width}"
 
