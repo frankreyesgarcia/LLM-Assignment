@@ -16,7 +16,8 @@
 # compute-bound): this grid's 59 cells sum to ~3.1h of total compute,
 # ~46min wall-clock across 4 GPUs under a greedy load-balanced schedule
 # (the slowest single cell, width=4 at C=3.16e14, is ~14min and sets a
-# floor). --time below keeps a large safety margin over that rather than
+# floor); the real run came in at 3h45m compute, 58min wall-clock.
+# --time below keeps a large safety margin over that rather than
 # cutting it close. -C "thin" pins this to Berzelius's 4-GPU-per-node
 # partition (vs. "fat" 8-GPU nodes, see
 # https://www.nsc.liu.se/support/systems/berzelius-gpu/ section 8) --

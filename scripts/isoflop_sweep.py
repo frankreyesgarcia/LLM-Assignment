@@ -131,11 +131,27 @@ FIELDNAMES = [
 ]
 
 
-def load_completed_cells(csv_path: Path) -> set[tuple[float, int]]:
+def load_completed_cells(csv_path: Path) -> dict[tuple[float, int], float]:
+    """Already-trained cells -> their elapsed_s. Keys drive the resume skip;
+    the values let the end-of-sweep summary report a total that spans
+    earlier invocations too, not just this one's cells."""
     if not csv_path.exists():
-        return set()
+        return {}
     with open(csv_path, newline="") as f:
-        return {(float(row["flops_budget"]), int(row["width"])) for row in csv.DictReader(f)}
+        return {(float(row["flops_budget"]), int(row["width"])): float(row["elapsed_s"]) for row in csv.DictReader(f)}
+
+
+def format_duration(seconds: float) -> str:
+    """Seconds -> "3h45m24s". Per-cell prints stay in raw seconds (directly
+    comparable across cells that way); only the sweep totals, which run to
+    hours, get this."""
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 def append_row(csv_path: Path, row: dict) -> None:
@@ -339,15 +355,22 @@ def main(args: argparse.Namespace) -> None:
         seed=args.seed,
     )
 
+    sweep_start = time.time()
+    # Summed per-cell training time, not wall-clock: with --devices these
+    # overlap, so this is total *device* time (the sweep's real compute
+    # cost) while sweep_start measures how long it took to get through it.
+    compute_s = 0.0
+
     if len(devices) == 1:
         for i, (flops_budget, width) in enumerate(todo, 1):
             print(f"[{i}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} ...")
             row = run_cell(flops_budget=flops_budget, width=width, device=devices[0], **common_kwargs)
             append_row(csv_path, row)
+            compute_s += row["elapsed_s"]
             print(
                 f"    n_params={row['n_params']:,} max_iters={row['max_iters']:,} "
                 f"train_loss={row['final_train_loss']:.4f} val_loss={row['final_val_loss']:.4f} "
-                f"({row['elapsed_s']:.1f}s)"
+                f"({row['elapsed_s']:.1f}s, {format_duration(compute_s)} cumulative)"
             )
     else:
         # Submission order cycles through `devices`, and ProcessPoolExecutor
@@ -368,14 +391,30 @@ def main(args: argparse.Namespace) -> None:
                 flops_budget, width = futures[future]
                 row = future.result()
                 append_row(csv_path, row)
+                compute_s += row["elapsed_s"]
                 print(
                     f"[{n_done}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} "
                     f"n_params={row['n_params']:,} max_iters={row['max_iters']:,} "
                     f"train_loss={row['final_train_loss']:.4f} val_loss={row['final_val_loss']:.4f} "
-                    f"({row['elapsed_s']:.1f}s)"
+                    f"({row['elapsed_s']:.1f}s, {format_duration(compute_s)} cumulative)"
                 )
 
+    wall_s = time.time() - sweep_start
     print(f"Done. {len(grid)} cells total in {csv_path}")
+    print(
+        f"  {len(todo)} cell(s) this invocation: {format_duration(compute_s)} of training time "
+        f"across {len(devices)} device(s), {format_duration(wall_s)} wall-clock"
+        # Perfect overlap would put compute_s at len(devices)*wall_s; the
+        # shortfall is idle GPUs (stragglers at the tail, startup) plus the
+        # main process's own CSV/eval bookkeeping between cells.
+        + (f" ({compute_s / (wall_s * len(devices)):.0%} device utilization)" if wall_s > 0 else "")
+    )
+    if completed:
+        # Resumed run: this invocation's total leaves out whatever earlier
+        # ones already paid for, so report the whole grid's cost as well.
+        grid_cells = set(grid)
+        grid_total_s = sum(elapsed for cell, elapsed in load_completed_cells(csv_path).items() if cell in grid_cells)
+        print(f"  {len(grid)} cell(s) including earlier invocations: {format_duration(grid_total_s)} of training time")
 
 
 if __name__ == "__main__":
