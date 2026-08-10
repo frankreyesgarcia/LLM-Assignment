@@ -96,6 +96,10 @@ set -euo pipefail
 # use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
+# To log this run to Weights & Biases, add e.g.
+#   --wandb --wandb-project llm-und-pretrain --wandb-run-name pretrain_1e17 \
+# below (needs `wandb login`/WANDB_API_KEY; see src/model/train.py's
+# TrainConfig wandb_* fields for the full option list).
 uv run scripts/train.py \
     --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
     --out-dir "$PROJECT_STORAGE/runs/pretrain_full" \

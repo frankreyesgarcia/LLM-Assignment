@@ -68,6 +68,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-iters", type=int, default=20)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help=(
+            "Log this run to Weights & Biases (https://wandb.ai): train/val loss + perplexity, "
+            "lr, grad norm, tokens seen/sec, elapsed time, per-step loss, plus this run's full "
+            "config (model shape, hyperparameters, --flops-budget) and param counts. Requires "
+            "`wandb login` (or WANDB_API_KEY) unless --wandb-mode offline."
+        ),
+    )
+    parser.add_argument("--wandb-project", default="llm-und-pretrain")
+    parser.add_argument("--wandb-entity", default=None, help="W&B team/username; defaults to your account.")
+    parser.add_argument("--wandb-run-name", default=None, help="Defaults to a wandb-generated name.")
+    parser.add_argument("--wandb-tags", nargs="+", default=None)
+    parser.add_argument(
+        "--wandb-mode",
+        default=None,
+        choices=["online", "offline", "disabled"],
+        help="Passed to wandb.init(mode=...). Use 'offline' on cluster nodes without outbound "
+        "internet access, then `wandb sync <run-dir>` from a node that has it.",
+    )
     return parser
 
 
@@ -115,6 +136,12 @@ if __name__ == "__main__":
         eval_iters=args.eval_iters,
         device=args.device,
         seed=args.seed,
+        use_wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
+        wandb_tags=tuple(args.wandb_tags) if args.wandb_tags else None,
+        wandb_mode=args.wandb_mode,
     )
     with tee_to_log(args.out_dir, "train"):
         result = train_model(cfg)
