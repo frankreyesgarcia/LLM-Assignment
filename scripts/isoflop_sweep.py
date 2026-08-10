@@ -155,11 +155,27 @@ def format_duration(seconds: float) -> str:
 
 
 def append_row(csv_path: Path, row: dict) -> None:
-    is_new = not csv_path.exists()
+    if not csv_path.exists():
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            writer.writeheader()
+            writer.writerow(row)
+            f.flush()
+        return
+
+    with open(csv_path, newline="") as f:
+        existing_header = next(csv.reader(f), [])
+    if existing_header != FIELDNAMES:
+        with open(csv_path, newline="") as f:
+            existing_rows = list(csv.DictReader(f))
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            writer.writeheader()
+            for existing_row in existing_rows:
+                writer.writerow({field: existing_row.get(field, "") for field in FIELDNAMES})
+
     with open(csv_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        if is_new:
-            writer.writeheader()
         writer.writerow(row)
         f.flush()
 
