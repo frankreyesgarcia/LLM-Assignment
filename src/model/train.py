@@ -62,6 +62,12 @@ class TrainConfig:
     # ckpt.pt below, which only helps if you're willing to lose everything
     # since the last improvement.
     checkpoint_interval: int | None = None
+    # Auto-resume from out_dir/ckpt_last.pt if one exists, instead of
+    # training from iter 0 -- lets a SLURM resubmission with the same
+    # --out-dir pick up where a failed/timed-out run left off. Only takes
+    # effect if checkpoint_interval actually produced a ckpt_last.pt to
+    # resume from.
+    resume: bool = True
 
 
 def load_data(data_dir: Path) -> tuple[np.memmap, np.memmap, dict]:
@@ -195,6 +201,25 @@ def train_model(cfg: TrainConfig) -> dict:
         out_dir.mkdir(parents=True, exist_ok=True)
         log_path = out_dir / "log.jsonl"
 
+    best_val_loss = float("inf")
+    start_iter = 0
+    elapsed_offset_s = 0.0
+    resume_path = out_dir / "ckpt_last.pt" if out_dir is not None else None
+    if cfg.resume and resume_path is not None and resume_path.exists():
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        if ckpt["model_cfg"] != model_cfg:
+            raise ValueError(
+                f"Refusing to resume from {resume_path}: it was trained with model_cfg "
+                f"{ckpt['model_cfg']}, which doesn't match this run's {model_cfg}. Point "
+                "--out-dir at an empty directory for a differently-shaped run."
+            )
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        best_val_loss = ckpt["best_val_loss"]
+        start_iter = ckpt["iter_num"] + 1
+        elapsed_offset_s = ckpt.get("elapsed_s", 0.0)
+        print(f"Resumed from {resume_path} at iter {start_iter} (best_val_loss={best_val_loss:.4f})")
+
     wandb_run = None
     if cfg.use_wandb:
         import wandb
@@ -216,20 +241,19 @@ def train_model(cfg: TrainConfig) -> dict:
             dir=str(out_dir) if out_dir is not None else None,
         )
 
-    best_val_loss = float("inf")
     history: list[dict] = []
     start = time.time()
     tokens_per_iter = cfg.batch_size * cfg.block_size
 
     try:
-        for it in range(cfg.max_iters):
+        for it in range(start_iter, cfg.max_iters):
             lr = lr_at(it, cfg)
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
             if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
                 losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
-                elapsed_s = time.time() - start
+                elapsed_s = time.time() - start + elapsed_offset_s
                 tokens_seen = it * tokens_per_iter
                 record = {
                     "iter": it,
@@ -279,6 +303,21 @@ def train_model(cfg: TrainConfig) -> dict:
                     {"model_state_dict": model.state_dict(), "model_cfg": model_cfg, "iter_num": it},
                     out_dir / f"ckpt_iter{it:07d}.pt",
                 )
+                # Separate from the ckpt_iter{N}.pt snapshot above: this one
+                # carries optimizer state and gets overwritten in place (not
+                # numbered), so resuming never has to guess which file is
+                # newest -- see TrainConfig.resume.
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "model_cfg": model_cfg,
+                        "iter_num": it,
+                        "best_val_loss": best_val_loss,
+                        "elapsed_s": elapsed_s,
+                    },
+                    out_dir / "ckpt_last.pt",
+                )
 
             x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
             # The EOS position's target is the next document's first token,
@@ -295,7 +334,7 @@ def train_model(cfg: TrainConfig) -> dict:
                 wandb_run.log({"train/step_loss": loss.item(), "grad_norm": grad_norm.item(), "lr": lr}, step=it)
 
         final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
-        elapsed_s = time.time() - start
+        elapsed_s = time.time() - start + elapsed_offset_s
         if out_dir is not None:
             # Unconditional, unlike the mid-training "best val loss so far"
             # save above -- callers that only ever care about the fully

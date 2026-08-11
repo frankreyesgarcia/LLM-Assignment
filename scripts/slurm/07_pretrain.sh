@@ -52,14 +52,19 @@
 # max_iters (the same fractions an earlier hand-picked config used) --
 # --flops-budget only derives max_iters, not these.
 #
-# KNOWN GAP: src/model/train.py has no gradient accumulation, no mixed
+# KNOWN GAP: src/model/train.py has no gradient accumulation and no mixed
 # precision (fp32 throughout despite GPT using
 # F.scaled_dot_product_attention, which would get Flash Attention for free
-# under autocast), and no checkpoint-resume (only saves the best-val-loss
-# ckpt, can't continue a run past a job's walltime). For a single job that
-# fits in one submission this is fine; if a real run needs to span
-# multiple jobs or go faster, those would need to be added to
+# under autocast). For a single job that fits in one submission this is
+# fine; if a real run needs to go faster, that would need to be added to
 # src/model/train.py first -- not done here since it wasn't asked for.
+#
+# Resubmitting this exact script (same --out-dir) auto-resumes from
+# out_dir/ckpt_last.pt if a previous submission got partway through and
+# died (walltime, node failure, ...) -- see TrainConfig.resume in
+# src/model/train.py. --checkpoint-interval below isn't set explicitly, so
+# it defaults to --eval-interval's cadence (scripts/train.py), i.e. a
+# resume loses at most one eval_interval's worth of work.
 #
 # --partition/--gpus: Berzelius' CPU partition is explicitly named
 # "berzelius-cpu" elsewhere in this repo (see _common.sh, 01-05); by
