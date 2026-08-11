@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.model.gpt import GPT, GPTConfig
 from src.model.scaling import describe_budget, max_iters_for_budget
-from src.model.train import TrainConfig, train_model
+from src.model.train import DEFAULT_VAL_BIN, TrainConfig, train_model
 from src.tokenizer.logging_utils import tee_to_log
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +49,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "max_iters are instead derived from that shape's actual param count and this budget "
             "(src/model/scaling.py)."
         ),
+    )
+    parser.add_argument(
+        "--val-bin",
+        default=DEFAULT_VAL_BIN,
+        help=f"Validation token file inside --data-dir (default {DEFAULT_VAL_BIN}; see src/model/train.py).",
     )
     parser.add_argument("--block-size", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -147,6 +152,7 @@ if __name__ == "__main__":
 
     cfg = TrainConfig(
         data_dir=args.data_dir,
+        val_bin=args.val_bin,
         out_dir=args.out_dir,
         block_size=args.block_size,
         batch_size=args.batch_size,

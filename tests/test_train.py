@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from src.model.train import TrainConfig, train_model
+from src.model.train import DEFAULT_VAL_BIN, TrainConfig, train_model
 
 
 def _make_data_dir(tmp_path, vocab_size=50, n_train=2000, n_val=500):
@@ -13,7 +13,7 @@ def _make_data_dir(tmp_path, vocab_size=50, n_train=2000, n_val=500):
     data_dir.mkdir()
     rng = np.random.default_rng(0)
     rng.integers(0, vocab_size, n_train, dtype=np.uint16).tofile(data_dir / "train.bin")
-    rng.integers(0, vocab_size, n_val, dtype=np.uint16).tofile(data_dir / "val.bin")
+    rng.integers(0, vocab_size, n_val, dtype=np.uint16).tofile(data_dir / DEFAULT_VAL_BIN)
     (data_dir / "meta.json").write_text(json.dumps({"vocab_size": vocab_size, "eos_token_id": 0}))
     return data_dir
 

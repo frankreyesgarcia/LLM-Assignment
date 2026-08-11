@@ -19,10 +19,24 @@ import torch
 from src.model.gpt import GPT, GPTConfig
 
 
+# Validation split held out from the training corpus by shard. The
+# default because it's the only one comparable to the training loss: this
+# project's val.bin was replaced by an unrelated corpus (job 17179385
+# renamed the original to this name), and meta.json's val_source records
+# what a given data_dir's val.bin actually holds. Pass --val-bin val.bin
+# for a data_dir straight out of prepare_pretrain_data_streaming.py,
+# which writes only that.
+DEFAULT_VAL_BIN = "val.bin.trainsplit"
+
+
 @dataclass
 class TrainConfig:
     data_dir: Path
     out_dir: Path | None = None
+    # Which file in data_dir holds the validation tokens -- see load_data
+    # for why this is named rather than hardcoded, and why the
+    # in-distribution split is the default.
+    val_bin: str = DEFAULT_VAL_BIN
     block_size: int = 128
     batch_size: int = 32
     n_layer: int = 4
@@ -70,10 +84,19 @@ class TrainConfig:
     resume: bool = True
 
 
-def load_data(data_dir: Path) -> tuple[np.memmap, np.memmap, dict]:
+def load_data(data_dir: Path, val_bin: str = DEFAULT_VAL_BIN) -> tuple[np.memmap, np.memmap, dict]:
+    """Memory-map the train/val token streams and read meta.json.
+
+    Missing files raise rather than falling back to another split, so a
+    typo can't silently change what every val number downstream means.
+    """
     meta = json.loads((data_dir / "meta.json").read_text())
+    val_path = data_dir / val_bin
+    if not val_path.exists():
+        available = sorted(p.name for p in data_dir.glob("val*.bin*"))
+        raise FileNotFoundError(f"{val_path} not found; validation files present in {data_dir}: {available or 'none'}")
     train = np.memmap(data_dir / "train.bin", dtype=np.uint16, mode="r")
-    val = np.memmap(data_dir / "val.bin", dtype=np.uint16, mode="r")
+    val = np.memmap(val_path, dtype=np.uint16, mode="r")
     return train, val, meta
 
 
@@ -179,7 +202,7 @@ def train_model(cfg: TrainConfig) -> dict:
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda" if (cfg.device == "auto" and torch.cuda.is_available()) else ("cpu" if cfg.device == "auto" else cfg.device))
 
-    train_data, val_data, meta = load_data(cfg.data_dir)
+    train_data, val_data, meta = load_data(cfg.data_dir, cfg.val_bin)
     model_cfg = GPTConfig(
         vocab_size=meta["vocab_size"],
         block_size=cfg.block_size,
