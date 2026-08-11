@@ -24,8 +24,12 @@
 # src/model/train.py has no mixed precision -- see KNOWN GAP below).
 # 1e17 FLOPs / 9.162 TFLOP/s ~= 10,914s ~= 3.03h. Recompute this conversion
 # factor from your own dry run before trusting it on different hardware --
-# e.g.
-#   uv run scripts/train.py --data-dir ... --out-dir ... --max-iters 100 \
+# e.g. (--out-dir must NOT be the real run's out_dir below: with periodic
+# checkpointing on by default -- see TrainConfig.resume -- a real
+# submission pointed at a directory that already has a dry run's
+# ckpt_last.pt in it would silently resume from there instead of starting
+# clean)
+#   uv run scripts/train.py --data-dir ... --out-dir runs/dryrun --max-iters 100 \
 #       --n-layer 8 --n-head 8 --n-embd 512 --batch-size 8 --block-size 1024
 # then achieved_flops_per_sec = 6 * n_params_total * measured_tokens_per_sec,
 # and --flops-budget = achieved_flops_per_sec * (desired wall-clock seconds).
