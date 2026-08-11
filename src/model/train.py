@@ -60,10 +60,7 @@ class TrainConfig:
     # Save a checkpoint (out_dir/ckpt_iter{N}.pt) every this many iterations,
     # regardless of val loss -- distinct from the "best val loss so far"
     # ckpt.pt below, which only helps if you're willing to lose everything
-    # since the last improvement. None (default) disables this: a multi-hour
-    # real pretraining run (scripts/slurm/07_pretrain.sh) wants these for
-    # crash recovery and for inspecting training dynamics at fixed points,
-    # but short-lived callers (tests, isoflop_sweep.py's cells) don't.
+    # since the last improvement.
     checkpoint_interval: int | None = None
 
 
@@ -302,11 +299,8 @@ def train_model(cfg: TrainConfig) -> dict:
         if out_dir is not None:
             # Unconditional, unlike the mid-training "best val loss so far"
             # save above -- callers that only ever care about the fully
-            # trained model (e.g. isoflop_sweep.py's per-cell checkpoints)
-            # need this exact final state even when a noisier earlier eval
-            # happened to score a lower val_loss (short cells especially:
-            # only two evals total, at it=0 and it=max_iters-1, so "best"
-            # there is not a meaningful signal).
+            # trained model need this exact final state even when a noisier
+            # earlier eval happened to score a lower val_loss.
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
