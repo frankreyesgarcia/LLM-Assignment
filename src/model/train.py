@@ -71,6 +71,11 @@ class TrainConfig:
     # repo's train.bin have an EOS before them, so this is not a rare
     # corner. A flag so it can be ablated at matched FLOPs.
     doc_masking: bool = True
+    # Save a checkpoint (out_dir/ckpt_iter{N}.pt) every this many iterations,
+    # regardless of val loss -- distinct from the "best val loss so far"
+    # ckpt.pt below, which only helps if you're willing to lose everything
+    # since the last improvement.
+    checkpoint_interval: int | None = None
 
 
 def load_data(data_dir: Path, val_bin: str = DEFAULT_VAL_BIN) -> tuple[np.memmap, np.memmap, dict]:
@@ -289,6 +294,15 @@ def train_model(cfg: TrainConfig) -> dict:
                         out_dir / "ckpt.pt",
                     )
 
+            # Periodic snapshot, independent of eval_interval/best_val_loss
+            # above -- see TrainConfig.checkpoint_interval's docstring for why
+            # this is a separate knob rather than piggybacking on those.
+            if out_dir is not None and cfg.checkpoint_interval is not None and it > 0 and it % cfg.checkpoint_interval == 0:
+                torch.save(
+                    {"model_state_dict": model.state_dict(), "model_cfg": model_cfg, "iter_num": it},
+                    out_dir / f"ckpt_iter{it:07d}.pt",
+                )
+
             x, y = get_batch(train_data, cfg.block_size, cfg.batch_size, device)
             # The EOS position's target is the next document's first token,
             # which masking makes unpredictable. Left in anyway: ~1 token in
@@ -305,6 +319,21 @@ def train_model(cfg: TrainConfig) -> dict:
 
         final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
         elapsed_s = time.time() - start
+        if out_dir is not None:
+            # Unconditional, unlike the mid-training "best val loss so far"
+            # save above -- callers that only ever care about the fully
+            # trained model need this exact final state even when a noisier
+            # earlier eval happened to score a lower val_loss.
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "model_cfg": model_cfg,
+                    "iter_num": cfg.max_iters - 1,
+                    "final_train_loss": final["train"],
+                    "final_val_loss": final["val"],
+                },
+                out_dir / "ckpt_final.pt",
+            )
         if wandb_run is not None:
             wandb_run.summary["final_train_loss"] = final["train"]
             wandb_run.summary["final_val_loss"] = final["val"]

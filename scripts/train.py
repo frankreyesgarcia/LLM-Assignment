@@ -72,6 +72,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-interval", type=int, default=100)
     parser.add_argument("--eval-iters", type=int, default=20)
     parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=None,
+        help="Save a checkpoint (out_dir/ckpt_iter{N}.pt) every this many iterations, on top of "
+        "the best-val-loss ckpt.pt above -- for crash recovery and inspecting training dynamics "
+        "on a long run. Defaults to --eval-interval (already a per-run-tuned cadence) rather than "
+        "a fixed number, which wouldn't generalize across different --max-iters budgets.",
+    )
+    parser.add_argument(
         "--no-doc-masking",
         dest="doc_masking",
         action="store_false",
@@ -129,6 +138,8 @@ if __name__ == "__main__":
     else:
         max_iters = args.max_iters if args.max_iters is not None else 1000
 
+    checkpoint_interval = args.checkpoint_interval if args.checkpoint_interval is not None else args.eval_interval
+
     cfg = TrainConfig(
         data_dir=args.data_dir,
         val_bin=args.val_bin,
@@ -147,6 +158,7 @@ if __name__ == "__main__":
         grad_clip=args.grad_clip,
         eval_interval=args.eval_interval,
         eval_iters=args.eval_iters,
+        checkpoint_interval=checkpoint_interval,
         device=args.device,
         seed=args.seed,
         use_wandb=args.wandb,
