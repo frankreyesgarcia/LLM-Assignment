@@ -64,24 +64,40 @@ FIT_LINE_COLOR = "#3a3a38"
 
 
 def load_results(csv_path: Path) -> dict[float, list[dict]]:
-    by_budget: dict[float, list[dict]] = defaultdict(list)
+    """One point per (budget, width) cell. A cell trained more than once
+    (scripts/isoflop_sweep.py --repeats, one row per seed) collapses to the
+    mean of its repeats, so a cell contributes one point to the parabola
+    regardless of how many times it was run; "n_runs"/"train_loss_std"
+    carry the spread for reporting."""
+    cells: dict[tuple[float, int], list[dict]] = defaultdict(list)
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
-            by_budget[float(row["flops_budget"])].append(
-                {
-                    "width": int(row["width"]),
-                    # n_params is total (embedding included) -- Chinchilla's
-                    # own convention (module docstring; not Kaplan's, which
-                    # excludes embeddings) -- and is what the parabola/
-                    # power-law fit below is run on. n_params_non_embedding
-                    # is carried along only to report the embedding
-                    # fraction (see main()), not used in any fit.
-                    "n_params": int(row["n_params"]),
-                    "n_params_non_embedding": int(row["n_params_non_embedding"]),
-                    "train_loss": float(row["final_train_loss"]),
-                    "val_loss": float(row["final_val_loss"]),
-                }
-            )
+            cells[(float(row["flops_budget"]), int(row["width"]))].append(row)
+
+    by_budget: dict[float, list[dict]] = defaultdict(list)
+    for (flops_budget, width), rows in cells.items():
+        train = [float(r["final_train_loss"]) for r in rows]
+        val = [float(r["final_val_loss"]) for r in rows]
+        by_budget[flops_budget].append(
+            {
+                "width": width,
+                # n_params is total (embedding included) -- Chinchilla's
+                # own convention (module docstring; not Kaplan's, which
+                # excludes embeddings) -- and is what the parabola/
+                # power-law fit below is run on. n_params_non_embedding
+                # is carried along only to report the embedding
+                # fraction (see main()), not used in any fit.
+                "n_params": int(rows[0]["n_params"]),
+                "n_params_non_embedding": int(rows[0]["n_params_non_embedding"]),
+                "train_loss": float(np.mean(train)),
+                "val_loss": float(np.mean(val)),
+                "n_runs": len(rows),
+                # Spread across repeats: the run-to-run noise this cell's
+                # mean is averaging down. 0.0 for a single-run cell, which
+                # measures nothing rather than meaning "no noise".
+                "train_loss_std": float(np.std(train, ddof=1)) if len(train) > 1 else 0.0,
+            }
+        )
     for rows in by_budget.values():
         rows.sort(key=lambda r: r["n_params"])
     return dict(sorted(by_budget.items()))
@@ -249,7 +265,18 @@ def main() -> None:
 
     by_budget = load_results(args.results_csv)
     all_rows = [r for rows in by_budget.values() for r in rows]
-    print(f"Loaded {len(all_rows)} cells across {len(by_budget)} FLOP budgets from {args.results_csv}")
+    n_runs = sum(r["n_runs"] for r in all_rows)
+    print(
+        f"Loaded {len(all_rows)} cells ({n_runs} training run(s)) across {len(by_budget)} FLOP budgets "
+        f"from {args.results_csv}"
+    )
+    repeated = [r for r in all_rows if r["n_runs"] > 1]
+    if repeated:
+        print(
+            f"  {len(repeated)} cell(s) have repeats -- fitting their mean loss; "
+            f"per-cell run-to-run std: {min(r['train_loss_std'] for r in repeated):.4f}-"
+            f"{max(r['train_loss_std'] for r in repeated):.4f}"
+        )
     embed_fracs = [1 - r["n_params_non_embedding"] / r["n_params"] for r in all_rows]
     print(
         f"  embedding share of total N: {min(embed_fracs):.1%}-{max(embed_fracs):.1%} across cells "
@@ -304,6 +331,7 @@ def main() -> None:
         "n_budgets_used": len(budgets),
         "n_budgets_total": len(by_budget),
         "n_cells": len(all_rows),
+        "n_runs": n_runs,
         "embedding_share_of_n": {"min": min(embed_fracs), "max": max(embed_fracs)},
         "n_opt_fit": {"coefficient": n_fit[0], "exponent": n_fit[1]},
         "d_opt_fit": {"coefficient": d_fit[0], "exponent": d_fit[1]},

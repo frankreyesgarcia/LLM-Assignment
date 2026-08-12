@@ -83,16 +83,37 @@ def test_gpt_shape_for_width_matches_real_run_shape():
     assert gpt_shape_for_width(512) == (8, 8, 512)
 
 
-def test_gpt_shape_for_width_keeps_head_dim_fixed_above_width_head_dim():
+def test_gpt_shape_for_width_keeps_head_dim_exact_for_multiples():
+    # Multiples of WIDTH_HEAD_DIM can hit it exactly, so they still must.
     for width in (64, 128, 192, 384, 640):
         n_layer, n_head, n_embd = gpt_shape_for_width(width)
         assert n_embd == width
         assert n_embd // n_head == WIDTH_HEAD_DIM
 
 
-def test_gpt_shape_for_width_rejects_non_multiple_above_width_head_dim():
+def test_gpt_shape_for_width_non_multiple_gets_nearest_achievable_head_dim():
+    # In-between widths are allowed (the sweep needs them to sample the
+    # parabola vertex densely) and take the head size closest to
+    # WIDTH_HEAD_DIM that divides the width evenly.
+    for width, expected_head_dim in ((80, 80), (96, 48), (112, 56), (160, 80), (224, 56)):
+        _, n_head, n_embd = gpt_shape_for_width(width)
+        assert n_embd == width
+        assert n_embd % n_head == 0
+        assert n_embd // n_head == expected_head_dim
+
+
+def test_gpt_shape_for_width_head_dim_is_optimal_over_all_divisors():
+    # The chosen n_head must beat every other divisor of n_embd on
+    # |head_dim - WIDTH_HEAD_DIM|, not merely divide evenly.
+    for width in (24, 40, 56, 80, 96, 112, 160, 224, 288, 352):
+        _, n_head, n_embd = gpt_shape_for_width(width)
+        best = min(abs(n_embd / h - WIDTH_HEAD_DIM) for h in range(1, n_embd + 1) if n_embd % h == 0)
+        assert abs(n_embd / n_head - WIDTH_HEAD_DIM) == best
+
+
+def test_gpt_shape_for_width_rejects_non_positive_width():
     with pytest.raises(ValueError):
-        gpt_shape_for_width(100)
+        gpt_shape_for_width(0)
 
 
 def test_gpt_shape_for_width_below_width_head_dim_uses_single_head():
@@ -121,7 +142,7 @@ def test_gpt_shape_for_width_num_params_is_monotonic_in_width():
     # search relies on num_params(width) increasing monotonically with
     # width -- verify that still holds for this shape family, including
     # across the WIDTH_HEAD_DIM boundary where n_head's formula changes.
-    widths = [16, 32, 48, 64, 128, 192, 256, 320, 384, 448, 512, 640, 768]
+    widths = [4, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768]
     counts = []
     for width in widths:
         n_layer, n_head, n_embd = gpt_shape_for_width(width)
