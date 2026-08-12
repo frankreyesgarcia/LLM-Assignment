@@ -24,8 +24,12 @@
 # src/model/train.py has no mixed precision -- see KNOWN GAP below).
 # 1e17 FLOPs / 9.162 TFLOP/s ~= 10,914s ~= 3.03h. Recompute this conversion
 # factor from your own dry run before trusting it on different hardware --
-# e.g.
-#   uv run scripts/train.py --data-dir ... --out-dir ... --max-iters 100 \
+# e.g. (--out-dir must NOT be the real run's out_dir below: with periodic
+# checkpointing on by default -- see TrainConfig.resume -- a real
+# submission pointed at a directory that already has a dry run's
+# ckpt_last.pt in it would silently resume from there instead of starting
+# clean)
+#   uv run scripts/train.py --data-dir ... --out-dir runs/dryrun --max-iters 100 \
 #       --n-layer 8 --n-head 8 --n-embd 512 --batch-size 8 --block-size 1024
 # then achieved_flops_per_sec = 6 * n_params_total * measured_tokens_per_sec,
 # and --flops-budget = achieved_flops_per_sec * (desired wall-clock seconds).
@@ -52,14 +56,19 @@
 # max_iters (the same fractions an earlier hand-picked config used) --
 # --flops-budget only derives max_iters, not these.
 #
-# KNOWN GAP: src/model/train.py has no gradient accumulation, no mixed
+# KNOWN GAP: src/model/train.py has no gradient accumulation and no mixed
 # precision (fp32 throughout despite GPT using
 # F.scaled_dot_product_attention, which would get Flash Attention for free
-# under autocast), and no checkpoint-resume (only saves the best-val-loss
-# ckpt, can't continue a run past a job's walltime). For a single job that
-# fits in one submission this is fine; if a real run needs to span
-# multiple jobs or go faster, those would need to be added to
+# under autocast). For a single job that fits in one submission this is
+# fine; if a real run needs to go faster, that would need to be added to
 # src/model/train.py first -- not done here since it wasn't asked for.
+#
+# Resubmitting this exact script (same --out-dir) auto-resumes from
+# out_dir/ckpt_last.pt if a previous submission got partway through and
+# died (walltime, node failure, ...) -- see TrainConfig.resume in
+# src/model/train.py. --checkpoint-interval below isn't set explicitly, so
+# it defaults to --eval-interval's cadence (scripts/train.py), i.e. a
+# resume loses at most one eval_interval's worth of work.
 #
 # --partition/--gpus: Berzelius' CPU partition is explicitly named
 # "berzelius-cpu" elsewhere in this repo (see _common.sh, 01-05); by

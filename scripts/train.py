@@ -81,6 +81,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "a fixed number, which wouldn't generalize across different --max-iters budgets.",
     )
     parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Start from iter 0 even if --out-dir already has a ckpt_last.pt -- by default, "
+        "resuming from there is automatic, so resubmitting this same command with the same "
+        "--out-dir (e.g. after a SLURM job hits its walltime or crashes) picks up where it "
+        "left off instead of retraining from scratch. Only useful together with "
+        "--checkpoint-interval, which is what produces ckpt_last.pt in the first place.",
+    )
+    parser.add_argument(
         "--no-doc-masking",
         dest="doc_masking",
         action="store_false",
@@ -159,6 +169,7 @@ if __name__ == "__main__":
         eval_interval=args.eval_interval,
         eval_iters=args.eval_iters,
         checkpoint_interval=checkpoint_interval,
+        resume=args.resume,
         device=args.device,
         seed=args.seed,
         use_wandb=args.wandb,
