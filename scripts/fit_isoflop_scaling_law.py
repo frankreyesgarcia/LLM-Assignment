@@ -518,7 +518,7 @@ def main() -> None:
         "recommended_shape": {"n_layer": n_layer, "n_head": n_head, "n_embd": n_embd},
     }
     summary_path = args.out_dir / "fit_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2))
+    summary_path.write_text(json.dumps(summary, indent=2, allow_nan=False))
     print(f"Wrote {summary_path}")
 
     colors = budget_color_map(list(by_budget))
