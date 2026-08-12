@@ -95,8 +95,8 @@ def load_results(csv_path: Path) -> dict[float, list[dict]]:
     """One point per (budget, width) cell. A cell trained more than once
     (scripts/isoflop_sweep.py --repeats, one row per seed) collapses to the
     mean of its repeats, so a cell contributes one point to the parabola
-    regardless of how many times it was run; "n_runs"/"loss_std" carry the
-    spread for reporting."""
+    regardless of how many times it was run; "n_runs" and per-loss std
+    columns carry the spread for reporting."""
     cells: dict[tuple[float, int], list[dict]] = defaultdict(list)
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
@@ -120,11 +120,11 @@ def load_results(csv_path: Path) -> dict[float, list[dict]]:
                 "train_loss": float(np.mean(train)),
                 "val_loss": float(np.mean(val)),
                 "n_runs": len(rows),
-                # Spread across repeats of the fitted loss: the run-to-run
-                # noise this cell's mean is averaging down. 0.0 for a
-                # single-run cell, which measures nothing rather than
-                # meaning "no noise".
-                "loss_std": float(np.std(val if FIT_LOSS_KEY == "val_loss" else train, ddof=1)) if len(rows) > 1 else 0.0,
+                # Spread across repeats: the run-to-run noise this cell's
+                # mean is averaging down. 0.0 for a single-run cell, which
+                # measures nothing rather than meaning "no noise".
+                "train_loss_std": float(np.std(train, ddof=1)) if len(train) > 1 else 0.0,
+                "val_loss_std": float(np.std(val, ddof=1)) if len(val) > 1 else 0.0,
             }
         )
     for rows in by_budget.values():
@@ -360,10 +360,11 @@ def main() -> None:
     )
     repeated = [r for r in all_rows if r["n_runs"] > 1]
     if repeated:
+        loss_std_key = f"{FIT_LOSS_KEY}_std"
         print(
             f"  {len(repeated)} cell(s) have repeats -- fitting their mean loss; "
-            f"per-cell run-to-run std: {min(r['loss_std'] for r in repeated):.4f}-"
-            f"{max(r['loss_std'] for r in repeated):.4f}"
+            f"per-cell run-to-run std: {min(r[loss_std_key] for r in repeated):.4f}-"
+            f"{max(r[loss_std_key] for r in repeated):.4f}"
         )
     embed_fracs = [1 - r["n_params_non_embedding"] / r["n_params"] for r in all_rows]
     print(
