@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.model.gpt import GPT, GPTConfig
 from src.model.scaling import describe_budget, max_iters_for_budget
-from src.model.train import DEFAULT_VAL_BIN, TrainConfig, train_model
+from src.model.train import AMP_DTYPE_CHOICES, DEFAULT_VAL_BIN, TrainConfig, train_model
 from src.tokenizer.logging_utils import tee_to_log
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -98,6 +98,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "whole packed window, the GPT-2/nanoGPT default), for ablation at matched FLOPs.",
     )
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--amp-dtype",
+        default="auto",
+        choices=list(AMP_DTYPE_CHOICES),
+        help="Mixed-precision mode for the forward/backward pass. 'auto' (default) uses bfloat16 "
+        "on GPUs that support it and fp32 elsewhere; 'fp32' opts out, at roughly 3-5x the wall "
+        "clock on Ampere. Master weights and optimizer state are fp32 either way.",
+    )
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument(
         "--wandb",
@@ -171,6 +179,7 @@ if __name__ == "__main__":
         checkpoint_interval=checkpoint_interval,
         resume=args.resume,
         device=args.device,
+        amp_dtype=args.amp_dtype,
         seed=args.seed,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,

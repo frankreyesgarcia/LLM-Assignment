@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,10 @@ from src.model.gpt import GPT, GPTConfig
 # for a data_dir straight out of prepare_pretrain_data_streaming.py,
 # which writes only that.
 DEFAULT_VAL_BIN = "val.bin.trainsplit"
+
+# Accepted TrainConfig.amp_dtype values. fp16 is deliberately absent: it
+# would need a GradScaler, and every GPU this runs on has bf16.
+AMP_DTYPE_CHOICES = ("auto", "bf16", "fp32")
 
 
 @dataclass
@@ -52,6 +57,11 @@ class TrainConfig:
     eval_interval: int = 100
     eval_iters: int = 20
     device: str = "auto"
+    # Autocast dtype for the forward/backward pass: "auto" (bf16 where the
+    # GPU supports it, fp32 otherwise), "bf16", or "fp32". Weights,
+    # gradients and optimizer state stay fp32, and bf16 has fp32's exponent
+    # range, so no gradient scaler is involved.
+    amp_dtype: str = "auto"
     seed: int = 1337
     log_every_eval: bool = True
     # Print a progress line every N iterations. Independent of
@@ -99,6 +109,45 @@ class TrainConfig:
     # effect if checkpoint_interval actually produced a ckpt_last.pt to
     # resume from.
     resume: bool = True
+
+
+def resolve_amp_dtype(spec: str, device: torch.device) -> torch.dtype | None:
+    """Turn a `TrainConfig.amp_dtype` spec into an autocast dtype, or None for fp32.
+
+    Non-CUDA devices always get None: CPU autocast is a slowdown here, and
+    the tests and smoke runs that use CPU want plain fp32 anyway.
+    """
+    if spec not in AMP_DTYPE_CHOICES:
+        raise ValueError(f"amp_dtype must be one of {AMP_DTYPE_CHOICES}, got {spec!r}")
+    if spec == "fp32" or device.type != "cuda":
+        return None
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    if spec == "bf16":
+        raise ValueError(
+            f"amp_dtype='bf16' but {torch.cuda.get_device_name(device)} has no bfloat16 "
+            "support (needs Ampere or newer); use 'auto' to fall back to fp32."
+        )
+    return None
+
+
+def autocast_for(device: torch.device, amp_dtype: torch.dtype | None):
+    """Autocast context for `amp_dtype`, or a no-op when running in fp32."""
+    if amp_dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
+
+def enable_tf32() -> None:
+    """Allow TF32 tensor cores for whatever stays in fp32.
+
+    PyTorch leaves this off for matmul by default, which costs ~8x the
+    matmul throughput on Ampere in exchange for mantissa bits that
+    pretraining does not need. Matters most when bf16 is unavailable and
+    the whole run is fp32.
+    """
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 
 def load_data(data_dir: Path, val_bin: str = DEFAULT_VAL_BIN) -> tuple[np.memmap, np.memmap, dict]:
@@ -191,7 +240,12 @@ def configure_optimizer(model: GPT, weight_decay: float, lr: float) -> torch.opt
 
 @torch.no_grad()
 def estimate_loss(
-    model: GPT, data: dict[str, np.memmap], cfg: TrainConfig, device: torch.device, eos_id: int | None = None
+    model: GPT,
+    data: dict[str, np.memmap],
+    cfg: TrainConfig,
+    device: torch.device,
+    eos_id: int | None = None,
+    amp_dtype: torch.dtype | None = None,
 ) -> dict[str, float]:
     out = {}
     model.eval()
@@ -202,7 +256,10 @@ def estimate_loss(
             # Same masking as training, or val_loss measures a context
             # regime the model was never trained in.
             doc_id = document_ids(x, eos_id) if eos_id is not None else None
-            _, loss = model(x, y, doc_id=doc_id)
+            # Same precision as the training step, or val_loss measures a
+            # numeric regime the model was never trained in.
+            with autocast_for(device, amp_dtype):
+                _, loss = model(x, y, doc_id=doc_id)
             losses[i] = loss.item()
         out[split] = losses.mean().item()
     model.train()
@@ -218,6 +275,14 @@ def train_model(cfg: TrainConfig) -> dict:
     """
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda" if (cfg.device == "auto" and torch.cuda.is_available()) else ("cpu" if cfg.device == "auto" else cfg.device))
+
+    amp_dtype = resolve_amp_dtype(cfg.amp_dtype, device)
+    precision = "fp32" if amp_dtype is None else str(amp_dtype).removeprefix("torch.")
+    if device.type == "cuda":
+        enable_tf32()
+        precision += " autocast + tf32 matmul" if amp_dtype is not None else " + tf32 matmul"
+    if cfg.log_every_eval:
+        print(f"device={device} precision={precision}")
 
     train_data, val_data, meta = load_data(cfg.data_dir, cfg.val_bin)
     model_cfg = GPTConfig(
@@ -268,6 +333,8 @@ def train_model(cfg: TrainConfig) -> dict:
         run_config.update(run_config.pop("wandb_config_extra", None) or {})
         run_config.update(
             device=str(device),
+            # cfg.amp_dtype is the request ("auto"); this is what it resolved to.
+            precision=precision,
             n_params_total=n_params_total,
             n_params_non_embed=n_params_non_embed,
             vocab_size=meta["vocab_size"],
@@ -301,7 +368,7 @@ def train_model(cfg: TrainConfig) -> dict:
                 group["lr"] = lr
 
             if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
-                losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
+                losses = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id, amp_dtype)
                 elapsed_s = time.time() - start + elapsed_offset_s
                 tokens_seen = it * tokens_per_iter
                 record = {
@@ -373,7 +440,10 @@ def train_model(cfg: TrainConfig) -> dict:
             # which masking makes unpredictable. Left in anyway: ~1 token in
             # 767, and it keeps loss comparable to the doc_masking=False arm.
             doc_id = document_ids(x, eos_id) if eos_id is not None else None
-            _, loss = model(x, y, doc_id=doc_id)
+            # backward() stays outside: autocast records the dtype each op
+            # ran in, so gradients follow without the context being active.
+            with autocast_for(device, amp_dtype):
+                _, loss = model(x, y, doc_id=doc_id)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -387,7 +457,7 @@ def train_model(cfg: TrainConfig) -> dict:
                 # a killed cell's progress is exactly what you want to read.
                 print(f"iter {it + 1:6d}/{cfg.max_iters} | loss {loss.item():.4f} | lr {lr:.2e}", flush=True)
 
-        final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
+        final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id, amp_dtype)
         elapsed_s = time.time() - start + elapsed_offset_s
         if out_dir is not None:
             # Unconditional, unlike the mid-training "best val loss so far"
