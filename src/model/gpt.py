@@ -74,9 +74,22 @@ def build_document_dense_mask(doc_id: torch.Tensor) -> torch.Tensor:
     return (causal & same_doc).unsqueeze(1)
 
 
-def build_document_mask(doc_id: torch.Tensor) -> BlockMask | torch.Tensor:
-    """Pick the mask representation the device can actually run."""
-    if doc_id.device.type == "cuda":
+# FlexAttention's Triton kernel refuses head dimensions below this:
+# "NYI: embedding dimension of the query, key, and value must be at least 16".
+# The IsoFLOP sweep's two narrowest widths (4 and 8, n_head=1) land under it.
+FLEX_MIN_HEAD_DIM = 16
+
+
+def build_document_mask(doc_id: torch.Tensor, head_dim: int | None = None) -> BlockMask | torch.Tensor:
+    """Pick the mask representation the device can actually run.
+
+    Below FLEX_MIN_HEAD_DIM the dense mask is the only option even on CUDA.
+    It computes the same thing (asserted in tests) at O(T^2) memory, which
+    is affordable precisely where it is needed: a head that narrow belongs
+    to a tiny model. Falling back keeps those cells in the sweep instead of
+    dropping the low-N end of the smallest budget's curve.
+    """
+    if doc_id.device.type == "cuda" and (head_dim is None or head_dim >= FLEX_MIN_HEAD_DIM):
         return build_document_block_mask(doc_id)
     return build_document_dense_mask(doc_id)
 
@@ -325,7 +338,7 @@ class GPT(nn.Module):
                 "attention dropout is unsupported alongside document masking "
                 "(FlexAttention takes no dropout_p); use dropout=0.0"
             )
-            block_mask = build_document_mask(doc_id)
+            block_mask = build_document_mask(doc_id, self.config.n_embd // self.config.n_head)
             pos = positions_within_document(doc_id)  # (B, T), not (T,)
 
         tok_emb = self.transformer.wte(idx)  # (B, T, n_embd)

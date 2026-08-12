@@ -63,3 +63,18 @@ def test_append_row_round_trips_through_load_completed_cells(tmp_path):
     append_row(csv_path, {**ROW, "seed": SEED + 1, "width": 40, "elapsed_s": 71.0})
 
     assert load_completed_cells(csv_path) == {(1e14, 32, SEED): 62.5, (1e14, 40, SEED + 1): 71.0}
+
+
+def test_narrow_head_dims_avoid_flex_attention():
+    # FlexAttention's kernel rejects head_dim < 16 ("NYI: embedding dimension
+    # ... must be at least 16"), which is what killed widths 4 and 8 in the
+    # v3 sweep. Those must take the dense mask instead of being dropped.
+    from src.model.gpt import FLEX_MIN_HEAD_DIM
+    from src.model.scaling import gpt_shape_for_width
+
+    for width in (4, 8):
+        _, n_head, n_embd = gpt_shape_for_width(width)
+        assert n_embd // n_head < FLEX_MIN_HEAD_DIM, f"width {width} was expected to be below the limit"
+    for width in (16, 24, 32, 64, 96, 512):
+        _, n_head, n_embd = gpt_shape_for_width(width)
+        assert n_embd // n_head >= FLEX_MIN_HEAD_DIM, f"width {width} should still use FlexAttention"

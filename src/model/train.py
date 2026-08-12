@@ -54,6 +54,11 @@ class TrainConfig:
     device: str = "auto"
     seed: int = 1337
     log_every_eval: bool = True
+    # Print a progress line every N iterations. Independent of
+    # eval_interval, which costs an eval each time -- this is just a
+    # print, so a long cell can report progress without paying for it.
+    # None disables it. W&B captures these into a run's Logs tab.
+    progress_every: int | None = None
     # W&B (https://wandb.ai) run logging -- off by default so existing
     # callers (tests, isoflop_sweep.py's many short-lived cells) don't
     # need a wandb account/API key just to call train_model(). wandb_mode
@@ -66,6 +71,18 @@ class TrainConfig:
     wandb_run_name: str | None = None
     wandb_tags: tuple[str, ...] | None = None
     wandb_mode: str | None = None
+    # Groups many runs under one name in the W&B UI -- a sweep's cells are
+    # one experiment, not 98 unrelated runs.
+    wandb_group: str | None = None
+    # Merged into the W&B run config on top of this dataclass's own
+    # fields. For values that identify a run without being training knobs
+    # -- a sweep cell's FLOPs budget, say, which TrainConfig never sees
+    # because the sweep has already turned it into max_iters.
+    wandb_config_extra: dict[str, object] | None = None
+    # Where wandb writes its run directories; defaults to out_dir. Set it
+    # when out_dir is None (sweep cells keep no checkpoints) so offline
+    # runs still land somewhere deliberate instead of ./wandb.
+    wandb_dir: Path | None = None
     # Mask attention across document boundaries and restart positional
     # indices per document. 43.7% of tokens in a 1024-token window of this
     # repo's train.bin have an EOS before them, so this is not a rare
@@ -248,20 +265,29 @@ def train_model(cfg: TrainConfig) -> dict:
         import wandb
 
         run_config = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()}
+        run_config.update(run_config.pop("wandb_config_extra", None) or {})
         run_config.update(
             device=str(device),
             n_params_total=n_params_total,
             n_params_non_embed=n_params_non_embed,
             vocab_size=meta["vocab_size"],
         )
+        wandb_dir = cfg.wandb_dir or out_dir
+        if wandb_dir is not None:
+            wandb_dir.mkdir(parents=True, exist_ok=True)
         wandb_run = wandb.init(
+            # 'wrap' wraps sys.stdout/stderr in-process. The default
+            # 'auto' picks fd-level redirection, which several pool
+            # workers sharing one inherited stdout mostly lose.
+            settings=wandb.Settings(console="wrap"),
             project=cfg.wandb_project,
             entity=cfg.wandb_entity,
             name=cfg.wandb_run_name,
+            group=cfg.wandb_group,
             tags=list(cfg.wandb_tags) if cfg.wandb_tags else None,
             mode=cfg.wandb_mode,
             config=run_config,
-            dir=str(out_dir) if out_dir is not None else None,
+            dir=str(wandb_dir) if wandb_dir is not None else None,
         )
 
     history: list[dict] = []
@@ -355,6 +381,11 @@ def train_model(cfg: TrainConfig) -> dict:
 
             if wandb_run is not None:
                 wandb_run.log({"train/step_loss": loss.item(), "grad_norm": grad_norm.item(), "lr": lr}, step=it)
+
+            if cfg.progress_every and (it + 1) % cfg.progress_every == 0:
+                # flush: SIGKILL (e.g. a SLURM time limit) skips buffers, and
+                # a killed cell's progress is exactly what you want to read.
+                print(f"iter {it + 1:6d}/{cfg.max_iters} | loss {loss.item():.4f} | lr {lr:.2e}", flush=True)
 
         final = estimate_loss(model, {"train": train_data, "val": val_data}, cfg, device, eos_id)
         elapsed_s = time.time() - start + elapsed_offset_s

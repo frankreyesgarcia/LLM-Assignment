@@ -13,12 +13,13 @@
 #
 # This grid densifies the widths around the parabola vertex (see
 # scripts/isoflop_sweep.py::DEFAULT_WIDTHS), taking it from 59 to 98
-# cells. Estimated from per-width s/iter measured on the previous
-# (isoflop_sweep_v2) run -- the same estimator reproduces that run's
-# actual 3h45m as 3.72h, so: ~6.6h of total compute, ~1.7h wall-clock
-# across 4 GPUs (v2 achieved 96% device utilization, so packing is
-# near-ideal), with the slowest single cell ~19min. --time below keeps a
-# large safety margin over that rather than cutting it close.
+# cells. --time is sized off measurement, not extrapolation: an earlier
+# v3 attempt got 87 of 98 cells done in 15.4 GPU-hours before its 4h wall
+# killed it, i.e. ~2.3x the 6.6h that v2's per-width s/iter predicted --
+# v2 predated document masking (#15), whose FlexAttention costs real time
+# per step. Median cell 210s, slowest 3695s. So ~18 GPU-hours for the
+# full grid, ~4.5h wall across 4 GPUs, and 12h leaves genuine margin
+# rather than the 4h that turned out to be under the actual cost.
 # -C "thin" pins this to Berzelius's 4-GPU-per-node
 # partition (vs. "fat" 8-GPU nodes, see
 # https://www.nsc.liu.se/support/systems/berzelius-gpu/ section 8) --
@@ -34,7 +35,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=runs/%j-08_isoflop_sweep.out
 #SBATCH --error=runs/%j-08_isoflop_sweep.err
 
@@ -46,10 +47,15 @@ set -euo pipefail
 # use SLURM_SUBMIT_DIR (the directory `sbatch` was invoked from) instead.
 source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
 
+# --wandb: one W&B run per cell, grouped under the out-dir name. Online
+# mode -- Berzelius compute nodes reach wandb.ai (the earlier pretrain runs
+# logged live); add --wandb-mode offline and `wandb sync` afterwards if that
+# ever stops holding.
 uv run scripts/isoflop_sweep.py \
     --data-dir "$PROJECT_STORAGE/data/pretrain_full" \
     --out-dir "$PROJECT_STORAGE/runs/isoflop_sweep_v3" \
-    --devices cuda:0 cuda:1 cuda:2 cuda:3
+    --devices cuda:0 cuda:1 cuda:2 cuda:3 \
+    --wandb
 
 echo "Results CSV + logs under: $PROJECT_STORAGE/runs/isoflop_sweep_v3"
 echo "Next: uv run scripts/fit_isoflop_scaling_law.py --results-csv $PROJECT_STORAGE/runs/isoflop_sweep_v3/results.csv"

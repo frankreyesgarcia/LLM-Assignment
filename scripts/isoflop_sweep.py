@@ -53,7 +53,9 @@ import json
 import multiprocessing as mp
 import sys
 import time
+import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -135,6 +137,24 @@ FIELDNAMES = [
     "final_val_loss",
     "elapsed_s",
 ]
+
+
+@dataclass(frozen=True)
+class WandbSettings:
+    """W&B options shared by every cell in a sweep. A frozen dataclass
+    rather than loose kwargs because it crosses a process boundary into
+    the worker pool -- see _run_cell_task."""
+
+    project: str
+    entity: str | None
+    group: str
+    tags: tuple[str, ...]
+    mode: str | None
+    dir: Path | None
+    # Whether run names carry their seed. Only worth the noise when a cell
+    # is trained more than once -- at --repeats 1 every run would carry the
+    # same one. The seed is in the run config either way.
+    name_seed: bool
 
 
 def load_completed_cells(csv_path: Path) -> dict[tuple[float, int, int], float]:
@@ -236,6 +256,7 @@ def run_cell(
     grad_clip: float,
     device: str,
     seed: int,
+    wandb: WandbSettings | None = None,
 ) -> dict:
     n_layer, n_head, n_embd = gpt_shape_for_width(width)
     model = GPT(GPTConfig(vocab_size=vocab_size, block_size=block_size, n_layer=n_layer, n_head=n_head, n_embd=n_embd))
@@ -281,6 +302,34 @@ def run_cell(
         device=device,
         seed=seed,
         log_every_eval=False,
+        # ~20 lines per cell whatever its length: eval_interval above is
+        # max_iters (evals cost compute), so this is the only progress a
+        # cell reports, and it is what W&B's Logs tab shows.
+        progress_every=max(1, max_iters // 20),
+        # One W&B run per cell, named for the cell it is. The sweep's own
+        # eval_interval keeps evals to the first and last iteration, but
+        # train_model logs step loss / lr / grad norm every iteration, so a
+        # cell's curve is still fully resolved.
+        use_wandb=wandb is not None,
+        **(
+            {}
+            if wandb is None
+            else {
+                "wandb_project": wandb.project,
+                "wandb_entity": wandb.entity,
+                "wandb_run_name": f"C{flops_budget:.2e}_w{width}" + (f"_s{seed}" if wandb.name_seed else ""),
+                "wandb_group": wandb.group,
+                "wandb_tags": (*wandb.tags, f"C={flops_budget:.2e}", f"width={width}", f"n_params={n_params}"),
+                "wandb_mode": wandb.mode,
+                "wandb_dir": wandb.dir,
+                # In the config as well as the tags: tags are opaque
+                # strings, so only these make budget and width usable as a
+                # numeric axis -- e.g. final_val_loss vs n_params_total
+                # grouped by flops_budget is this sweep's IsoFLOP parabola,
+                # live in W&B while it runs.
+                "wandb_config_extra": {"flops_budget": flops_budget, "width": width},
+            }
+        ),
     )
     start = time.time()
     result = train_model(cfg)
@@ -303,9 +352,31 @@ def run_cell(
     }
 
 
+# The device this worker process owns, claimed once at startup. A module
+# global because it must outlive individual tasks: see _init_worker.
+_WORKER_DEVICE: str | None = None
+
+
+def _init_worker(device_queue) -> None:
+    """Claim one device for the lifetime of this worker process.
+
+    Assigning the device per *task* instead (devices[i % len(devices)]) keeps
+    concurrent cells on distinct GPUs, but not a worker on a single one --
+    tasks go to whichever worker is free, so a process sees cuda:1, then
+    cuda:3, then cuda:0. torch.compile guards on device index, so
+    flex_attention (src/model/gpt.py, doc masking) recompiles on every
+    switch, hits torch._dynamo's recompile_limit of 8, and then silently
+    falls back to unfused eager attention -- correct, but without the fused
+    kernel or the block mask's tile skipping, which is the entire point of
+    compiling it. Pinning here means one compile per process.
+    """
+    global _WORKER_DEVICE
+    _WORKER_DEVICE = device_queue.get()
+
+
 def _run_cell_task(kwargs: dict) -> dict:
     """Top-level (picklable) wrapper so ProcessPoolExecutor can dispatch run_cell."""
-    return run_cell(**kwargs)
+    return run_cell(device=_WORKER_DEVICE, **kwargs)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -354,6 +425,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "resume into an existing CSV, so this can be raised after the fact."
         ),
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help=(
+            "Log every cell to Weights & Biases as its own run, grouped under --wandb-group and named "
+            "C<budget>_w<width> (plus _s<seed> when --repeats > 1). Needs `wandb login` (or WANDB_API_KEY) "
+            "unless --wandb-mode offline."
+        ),
+    )
+    parser.add_argument("--wandb-project", default="llm-und-isoflop", help="Separate from the pretraining "
+        "project so a sweep's ~100 short cells don't bury the real runs.")
+    parser.add_argument("--wandb-entity", default=None, help="W&B team/username; defaults to your account.")
+    parser.add_argument(
+        "--wandb-group",
+        default=None,
+        help="Groups this sweep's cells in the W&B UI. Defaults to --out-dir's name (e.g. isoflop_sweep_v3).",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        nargs="+",
+        default=["scaling-law"],
+        help="Applied to every cell, alongside its own C=/width=/n_params= tags.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        default=None,
+        help="Passed to wandb.init(mode=...). Use 'offline' on cluster nodes without outbound internet "
+        "access, then `wandb sync` the run dirs under --out-dir/wandb from a node that has it.",
+    )
     return parser
 
 
@@ -374,6 +474,22 @@ def main(args: argparse.Namespace) -> None:
 
     if args.repeats < 1:
         raise ValueError(f"--repeats must be >= 1, got {args.repeats}")
+
+    wandb_settings = None
+    if args.wandb:
+        wandb_settings = WandbSettings(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=args.wandb_group or args.out_dir.name,
+            tags=tuple(args.wandb_tags),
+            mode=args.wandb_mode,
+            name_seed=args.repeats > 1,
+            # Sweep cells set out_dir=None (no checkpoints), so wandb
+            # would otherwise scatter run dirs into the cwd. It creates its
+            # own wandb/ subdirectory under whatever it is given.
+            dir=args.out_dir,
+        )
+        print(f"W&B: project={wandb_settings.project} group={wandb_settings.group} mode={args.wandb_mode or 'online'}")
     seeds = [args.seed + i for i in range(args.repeats)]
 
     cells = build_grid(args.flop_budgets, args.widths, vocab_size, args.block_size, args.batch_size)
@@ -397,8 +513,10 @@ def main(args: argparse.Namespace) -> None:
         min_lr=args.min_lr,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
+        wandb=wandb_settings,
     )
 
+    failures: list[tuple[float, int, int, str]] = []
     sweep_start = time.time()
     # Summed per-cell training time, not wall-clock: with --devices these
     # overlap, so this is total *device* time (the sweep's real compute
@@ -408,7 +526,12 @@ def main(args: argparse.Namespace) -> None:
     if len(devices) == 1:
         for i, (flops_budget, width, seed) in enumerate(todo, 1):
             print(f"[{i}/{len(todo)}] flops_budget={flops_budget:.3e} width={width} seed={seed} ...")
-            row = run_cell(flops_budget=flops_budget, width=width, seed=seed, device=devices[0], **common_kwargs)
+            try:
+                row = run_cell(flops_budget=flops_budget, width=width, seed=seed, device=devices[0], **common_kwargs)
+            except Exception as exc:
+                failures.append((flops_budget, width, seed, f"{type(exc).__name__}: {exc}"))
+                print(f"[{i}/{len(todo)}] FAILED\n{traceback.format_exc()}", flush=True)
+                continue
             append_row(csv_path, row)
             compute_s += row["elapsed_s"]
             print(
@@ -417,23 +540,44 @@ def main(args: argparse.Namespace) -> None:
                 f"({row['elapsed_s']:.1f}s, {format_duration(compute_s)} cumulative)"
             )
     else:
-        # Submission order cycles through `devices`, and ProcessPoolExecutor
-        # dispatches strictly FIFO to exactly `len(devices)` worker processes --
-        # so any `len(devices)`-sized window of in-flight cells always contains
-        # each device exactly once. No locking needed for the CSV either: only
-        # this main process (in as_completed's loop below) ever writes to it.
+        # Each worker claims one device and keeps it (_init_worker explains
+        # why that matters for torch.compile), so cells no longer carry a
+        # device at all. No locking needed for the CSV either: only this main
+        # process (in as_completed's loop below) ever writes to it.
         ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=len(devices), mp_context=ctx) as pool:
+        device_queue = ctx.Queue()
+        for device in devices:
+            device_queue.put(device)
+        with ProcessPoolExecutor(
+            max_workers=len(devices), mp_context=ctx, initializer=_init_worker, initargs=(device_queue,)
+        ) as pool:
             futures = {
-                pool.submit(
-                    _run_cell_task,
-                    dict(flops_budget=c, width=w, seed=s, device=devices[i % len(devices)], **common_kwargs),
-                ): (c, w, s)
-                for i, (c, w, s) in enumerate(todo)
+                pool.submit(_run_cell_task, dict(flops_budget=c, width=w, seed=s, **common_kwargs)): (c, w, s)
+                for c, w, s in todo
             }
             for n_done, future in enumerate(as_completed(futures), 1):
                 flops_budget, width, seed = futures[future]
-                row = future.result()
+                # One bad cell must not end the sweep. future.result()
+                # re-raises whatever the worker raised; letting that
+                # propagate leaves the `with` block, and shutdown(wait=True)
+                # then blocks until all remaining cells finish -- so every
+                # other result is computed and then thrown away, the CSV is
+                # never written, and the traceback only prints hours later
+                # (or never, if the job hits its time limit first).
+                try:
+                    row = future.result()
+                except Exception as exc:
+                    failures.append((flops_budget, width, seed, f"{type(exc).__name__}: {exc}"))
+                    # Full traceback, including the worker-side one that
+                    # concurrent.futures chains on: a cell that dies in a
+                    # subprocess is otherwise near-impossible to diagnose
+                    # from the job log alone.
+                    print(
+                        f"[{n_done}/{len(todo)}] FAILED flops_budget={flops_budget:.3e} width={width} "
+                        f"seed={seed}\n{traceback.format_exc()}",
+                        flush=True,
+                    )
+                    continue
                 append_row(csv_path, row)
                 compute_s += row["elapsed_s"]
                 print(
@@ -444,7 +588,11 @@ def main(args: argparse.Namespace) -> None:
                 )
 
     wall_s = time.time() - sweep_start
-    print(f"Done. {len(grid)} run(s) across {len(cells)} cell(s) in {csv_path}")
+    if failures:
+        print(f"\n{len(failures)} cell(s) FAILED and are absent from {csv_path}:")
+        for flops_budget, width, seed, exc in failures:
+            print(f"  C={flops_budget:.3e} width={width} seed={seed}: {exc}")
+    print(f"Done. {len(grid) - len(failures)} run(s) across {len(cells)} cell(s) in {csv_path}")
     print(
         f"  {len(todo)} run(s) this invocation: {format_duration(compute_s)} of training time "
         f"across {len(devices)} device(s), {format_duration(wall_s)} wall-clock"

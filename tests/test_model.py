@@ -222,3 +222,16 @@ def test_before_and_after_on_one_concrete_window():
     assert torch.arange(T).tolist() == [0, 1, 2, 3, 4, 5]
     # AFTER -- each document counts from 0 again.
     assert positions_within_document(doc_id).tolist() == [[0, 1, 2, 0, 1, 2]]
+
+
+def test_build_document_mask_falls_back_below_min_head_dim():
+    # On CPU everything is dense already, so this pins the decision itself:
+    # a head_dim under the limit must not ask for a BlockMask.
+    import torch
+
+    from src.model.gpt import FLEX_MIN_HEAD_DIM, build_document_mask
+
+    doc_id = torch.tensor([[0, 0, 1, 1]])
+    dense = build_document_mask(doc_id, head_dim=FLEX_MIN_HEAD_DIM - 1)
+    assert isinstance(dense, torch.Tensor)
+    assert dense.shape == (1, 1, 4, 4)
