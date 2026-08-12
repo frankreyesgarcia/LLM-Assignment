@@ -13,6 +13,30 @@
 export PROJECT_ACCOUNT="${PROJECT_ACCOUNT:?set PROJECT_ACCOUNT to your Naiss allocation, e.g. naiss2026-x-y}"
 export PROJECT_STORAGE="${PROJECT_STORAGE:?set PROJECT_STORAGE to persistent project storage, e.g. /proj/your-project/llm-und}"
 
+# Triton compiles a small CUDA helper at runtime (torch.compile, reached via
+# FlexAttention in src/model/gpt.py) by shelling out to a C compiler. The gcc
+# on PATH here is an NSC wrapper that exits 1 with "you have not loaded the
+# appropriate build environment module", killing any job that compiles a
+# kernel. Triton reads CC before falling back to `which gcc`, so point it at
+# the system compiler. Overridable: a cluster with a working module-provided
+# gcc can export CC itself.
+export CC="${CC:-/usr/bin/gcc}"
+
+# ...and it needs Python.h, which comes from python3.12-devel -- installed on
+# the login node but NOT on the compute nodes, so sysconfig's
+# /usr/include/python3.12 resolves on the node you test from and is missing on
+# the node the job runs on. Point gcc at a copy kept in project storage
+# (CPATH is appended to, not replaced: the cluster already sets it).
+# Stage it once from a login node:
+#   mkdir -p "$PROJECT_STORAGE/pyheaders" && cp -r /usr/include/python3.12 "$PROJECT_STORAGE/pyheaders/"
+PY_HEADERS="$PROJECT_STORAGE/pyheaders/python3.12"
+if [ -f "$PY_HEADERS/Python.h" ]; then
+    export CPATH="$PY_HEADERS${CPATH:+:$CPATH}"
+elif [ ! -f /usr/include/python3.12/Python.h ]; then
+    echo "WARNING: no Python.h at $PY_HEADERS or /usr/include/python3.12 -- any torch.compile/FlexAttention job will fail." >&2
+    echo "         Stage it from a login node: mkdir -p \"\$PROJECT_STORAGE/pyheaders\" && cp -r /usr/include/python3.12 \"\$PROJECT_STORAGE/pyheaders/\"" >&2
+fi
+
 # huggingface_hub/datasets default to caching downloads under ~/.cache/huggingface,
 # i.e. $HOME -- which on Berzelius has only a 20GB quota (see scripts/slurm/README.md)
 # and would fill up almost immediately given the size of these sources (see
