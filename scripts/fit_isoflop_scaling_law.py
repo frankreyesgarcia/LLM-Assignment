@@ -299,7 +299,7 @@ def plot_frontier(
     if compare is not None:
         cmp_budgets, cmp_values, (cmp_coeff, cmp_exponent), cmp_label = compare
         for c, v in zip(cmp_budgets, cmp_values):
-            ax.scatter([c], [v], facecolor="none", edgecolor=colors[c], s=70, linewidth=1.4, zorder=3)
+            ax.scatter([c], [v], facecolors="none", edgecolors=colors[c], s=70, linewidths=1.4, zorder=3)
         ax.plot(
             x_line,
             cmp_coeff * x_line**cmp_exponent,
