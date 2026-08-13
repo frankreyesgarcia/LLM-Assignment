@@ -164,3 +164,9 @@ def test_train_model_runs_in_explicit_fp32(tmp_path):
     data_dir = _make_data_dir(tmp_path)
     cfg = _tiny_cfg(data_dir, tmp_path / "run", amp_dtype="fp32")
     assert train_model(cfg)["final_val_loss"] > 0
+
+
+def test_train_model_runs_with_qk_norm(tmp_path):
+    data_dir = _make_data_dir(tmp_path)
+    cfg = _tiny_cfg(data_dir, tmp_path / "run", qk_norm=True)
+    assert train_model(cfg)["final_val_loss"] > 0

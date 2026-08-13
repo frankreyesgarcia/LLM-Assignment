@@ -235,3 +235,96 @@ def test_build_document_mask_falls_back_below_min_head_dim():
     dense = build_document_mask(doc_id, head_dim=FLEX_MIN_HEAD_DIM - 1)
     assert isinstance(dense, torch.Tensor)
     assert dense.shape == (1, 1, 4, 4)
+
+
+def _attention_logits(model: GPT, x: torch.Tensor, layer: int = 0) -> torch.Tensor:
+    """Block `layer`'s raw attention scores, mirroring CausalSelfAttention.forward."""
+    attn = model.transformer.h[layer].attn
+    h = model.transformer.h[layer].ln_1(model.transformer.drop(
+        model.transformer.wte(x) + model.transformer.wpe(torch.arange(x.shape[1]))
+    ))
+    B, T, C = h.shape
+    q, k, _ = attn.c_attn(h).split(attn.n_embd, dim=2)
+    head_dim = C // attn.n_head
+    q = q.view(B, T, attn.n_head, head_dim).transpose(1, 2)
+    k = k.view(B, T, attn.n_head, head_dim).transpose(1, 2)
+    if attn.q_norm is not None:
+        q, k = attn.q_norm(q), attn.k_norm(k)
+    return (q @ k.transpose(-2, -1)) / math.sqrt(head_dim)
+
+
+def test_qk_norm_is_off_by_default():
+    model = GPT(_tiny_config())
+    assert model.transformer.h[0].attn.q_norm is None
+    assert model.transformer.h[0].attn.k_norm is None
+
+
+def test_qk_norm_adds_only_two_layernorms_per_block():
+    cfg = _tiny_config()
+    head_dim = cfg.n_embd // cfg.n_head
+    plain = GPT(cfg).num_params(non_embedding=False)
+    normed = GPT(_tiny_config(qk_norm=True)).num_params(non_embedding=False)
+    # weight + bias, for each of q and k, per block.
+    assert normed - plain == 4 * head_dim * cfg.n_layer
+
+
+def test_qk_norm_bounds_attention_logits_however_large_the_weights_get():
+    # The bf16 divergence was unbounded logit growth: c_attn's weights grew ~10x
+    # and took the logits to 1e7. LayerNorm on q/k is scale-invariant, so the
+    # same blow-up must leave the logits untouched -- and bounded by
+    # sqrt(head_dim), since normalised q and k each have norm sqrt(head_dim).
+    cfg = _tiny_config(qk_norm=True)
+    torch.manual_seed(0)
+    model = GPT(cfg).eval()
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    before = _attention_logits(model, x)
+
+    with torch.no_grad():
+        for p in model.transformer.h[0].attn.c_attn.parameters():
+            p.mul_(1000.0)
+    after = _attention_logits(model, x)
+
+    # Not bit-exact: LayerNorm divides by sqrt(var + eps), and a 1000x larger
+    # var leaves eps negligible where it previously was not. ~1%, against 1000x
+    # on the weights.
+    torch.testing.assert_close(before, after, rtol=0.05, atol=0.05)
+    # The bound itself is strict: normalised q and k have norm <= sqrt(head_dim)
+    # (equality but for eps), so |q.k| <= head_dim and the scaled logits <= sqrt.
+    head_dim = cfg.n_embd // cfg.n_head
+    assert after.abs().max().item() <= math.sqrt(head_dim)
+
+
+def test_without_qk_norm_the_same_blow_up_explodes_the_logits():
+    # Control for the test above: the bound comes from qk_norm, not from
+    # anything else in the block.
+    cfg = _tiny_config()
+    torch.manual_seed(0)
+    model = GPT(cfg).eval()
+    x = torch.randint(0, cfg.vocab_size, (2, cfg.block_size))
+    before = _attention_logits(model, x).abs().max().item()
+
+    with torch.no_grad():
+        for p in model.transformer.h[0].attn.c_attn.parameters():
+            p.mul_(1000.0)
+    after = _attention_logits(model, x).abs().max().item()
+
+    assert after > 1e5 * before
+
+
+def test_qk_norm_works_with_document_masking():
+    cfg = _tiny_config(qk_norm=True)
+    model = GPT(cfg)
+    x = torch.randint(2, cfg.vocab_size, (2, cfg.block_size))
+    x[:, 3] = 1  # an EOS, so the window holds two documents
+    logits, loss = model(x, targets=x, doc_id=document_ids(x, eos_id=1))
+    assert logits.shape == (2, cfg.block_size, cfg.vocab_size)
+    assert torch.isfinite(loss)
+
+
+def test_config_predating_qk_norm_still_builds():
+    # GPTConfig instances are pickled into every checkpoint. One written before
+    # the field existed has no qk_norm in its __dict__ and must fall back to the
+    # dataclass default rather than raising.
+    cfg = _tiny_config()
+    del cfg.__dict__["qk_norm"]
+    assert GPT(cfg).transformer.h[0].attn.q_norm is None

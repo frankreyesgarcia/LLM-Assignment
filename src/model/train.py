@@ -48,6 +48,10 @@ class TrainConfig:
     n_head: int = 4
     n_embd: int = 128
     dropout: float = 0.0
+    # LayerNorm q and k before the attention matmul. Off by default to keep
+    # existing runs comparable; effectively required under amp_dtype="bf16",
+    # where unbounded attention logits diverge (see GPTConfig.qk_norm).
+    qk_norm: bool = False
     max_iters: int = 1000
     lr: float = 3e-4
     min_lr: float = 3e-5
@@ -292,7 +296,14 @@ def train_model(cfg: TrainConfig) -> dict:
         n_head=cfg.n_head,
         n_embd=cfg.n_embd,
         dropout=cfg.dropout,
+        qk_norm=cfg.qk_norm,
     )
+    if amp_dtype is torch.bfloat16 and not cfg.qk_norm and cfg.log_every_eval:
+        print(
+            "WARNING: bf16 without qk_norm -- attention logits are unbounded and "
+            "have diverged at this scale before. Pass --qk-norm.",
+            flush=True,
+        )
     model = GPT(model_cfg).to(device)
     optimizer = configure_optimizer(model, cfg.weight_decay, cfg.lr)
     n_params_total = model.num_params(non_embedding=False)

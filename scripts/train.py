@@ -62,6 +62,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-embd", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument(
+        "--qk-norm",
+        action="store_true",
+        help="LayerNorm q and k before the attention matmul, bounding the attention logits. "
+        "Strongly recommended with --amp-dtype bf16, where unbounded logits diverge; adds "
+        "4*head_dim params per layer and leaves the FLOPs budget essentially unchanged.",
+    )
+    parser.add_argument(
         "--max-iters", type=int, default=None, help="Ignored if --flops-budget is set. Default 1000."
     )
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -145,6 +152,7 @@ if __name__ == "__main__":
                 n_layer=args.n_layer,
                 n_head=args.n_head,
                 n_embd=args.n_embd,
+                qk_norm=args.qk_norm,
             )
         ).num_params(non_embedding=False)
         max_iters = max_iters_for_budget(args.flops_budget, n_params, args.batch_size, args.block_size)
@@ -168,6 +176,7 @@ if __name__ == "__main__":
         n_head=args.n_head,
         n_embd=args.n_embd,
         dropout=args.dropout,
+        qk_norm=args.qk_norm,
         max_iters=max_iters,
         lr=args.lr,
         min_lr=args.min_lr,
