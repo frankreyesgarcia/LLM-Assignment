@@ -121,6 +121,10 @@ class GPTConfig:
     n_embd: int = 128
     dropout: float = 0.0
     bias: bool = True  # bias terms in Linear/LayerNorm; GPT-2 uses True, some newer models drop it
+    # LayerNorm q and k before the attention matmul, bounding the attention
+    # logits -- see CausalSelfAttention. Off by default so existing configs,
+    # the fitted IsoFLOP law and old checkpoints all keep their exact meaning.
+    qk_norm: bool = False
 
 
 class CausalSelfAttention(nn.Module):
@@ -151,6 +155,18 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
+        # QK-LayerNorm (Wortsman et al. 2023; Dehghani et al. ViT-22B). Nothing
+        # else bounds q.k, and in bf16 that is fatal: bf16's rounding step is
+        # ~1/128 of a value's magnitude, so as logits grow the smallest gap the
+        # model can still represent grows with them, while softmax needs gaps
+        # under ~8 to stay graded. Above logits of ~1e3 those two demands are
+        # incompatible and the head can only tie or go one-hot. Normalising q
+        # and k to unit scale caps |logits| near sqrt(head_dim), keeping the
+        # run in the regime where both hold. Costs 4*head_dim params per layer.
+        head_dim = config.n_embd // config.n_head
+        self.q_norm = nn.LayerNorm(head_dim, bias=config.bias) if config.qk_norm else None
+        self.k_norm = nn.LayerNorm(head_dim, bias=config.bias) if config.qk_norm else None
+
     def forward(self, x: torch.Tensor, block_mask: BlockMask | torch.Tensor | None = None) -> torch.Tensor:
         B, T, C = x.size()  # batch, sequence length, embedding dim
 
@@ -161,6 +177,13 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
+
+        if self.q_norm is not None:
+            # Back to v's dtype afterwards: autocast runs LayerNorm in fp32, and
+            # handing FlexAttention fp32 q/k alongside bf16 v either falls out of
+            # the fast path or refuses the mismatch outright.
+            q = self.q_norm(q).to(v.dtype)
+            k = self.k_norm(k).to(v.dtype)
 
         if block_mask is None:
             # scaled_dot_product_attention computes softmax(Q K^T / sqrt(d)) V

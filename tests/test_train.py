@@ -4,8 +4,15 @@ import json
 
 import numpy as np
 import pytest
+import torch
 
-from src.model.train import DEFAULT_VAL_BIN, TrainConfig, train_model
+from src.model.train import (
+    DEFAULT_VAL_BIN,
+    TrainConfig,
+    autocast_for,
+    resolve_amp_dtype,
+    train_model,
+)
 
 
 def _make_data_dir(tmp_path, vocab_size=50, n_train=2000, n_val=500):
@@ -107,8 +114,6 @@ def test_resume_after_completed_run_is_a_no_op_retrain(tmp_path):
     cfg1 = _tiny_cfg(data_dir, out_dir, max_iters=6, checkpoint_interval=5)
     train_model(cfg1)
 
-    import torch
-
     assert torch.load(out_dir / "ckpt_last.pt", weights_only=False)["iter_num"] == 5
 
     # Simulate re-submitting the same already-finished job: should not
@@ -116,3 +121,52 @@ def test_resume_after_completed_run_is_a_no_op_retrain(tmp_path):
     cfg2 = _tiny_cfg(data_dir, out_dir, max_iters=6, checkpoint_interval=5)
     result = train_model(cfg2)
     assert result["final_val_loss"] is not None
+
+
+def test_resolve_amp_dtype_is_fp32_off_cuda():
+    # CPU never autocasts, whatever was asked for -- tests and smoke runs
+    # want exact fp32, and CPU autocast wouldn't be a speedup anyway.
+    cpu = torch.device("cpu")
+    assert resolve_amp_dtype("auto", cpu) is None
+    assert resolve_amp_dtype("fp32", cpu) is None
+    assert resolve_amp_dtype("bf16", cpu) is None
+
+
+def test_resolve_amp_dtype_rejects_unknown_spec():
+    with pytest.raises(ValueError, match="amp_dtype must be one of"):
+        resolve_amp_dtype("fp16", torch.device("cpu"))
+
+
+def test_resolve_amp_dtype_picks_bf16_on_capable_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    assert resolve_amp_dtype("auto", torch.device("cuda")) is torch.bfloat16
+    assert resolve_amp_dtype("bf16", torch.device("cuda")) is torch.bfloat16
+    # An explicit opt-out still wins over capable hardware.
+    assert resolve_amp_dtype("fp32", torch.device("cuda")) is None
+
+
+def test_resolve_amp_dtype_without_bf16_support(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: False)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "Quadro RTX 6000")
+    # "auto" degrades silently; "bf16" is a demand, so it fails loudly
+    # rather than quietly running 4x slower than the user asked for.
+    assert resolve_amp_dtype("auto", torch.device("cuda")) is None
+    with pytest.raises(ValueError, match="no bfloat16 support"):
+        resolve_amp_dtype("bf16", torch.device("cuda"))
+
+
+def test_autocast_for_is_a_no_op_in_fp32():
+    with autocast_for(torch.device("cpu"), None):
+        assert not torch.is_autocast_enabled()
+
+
+def test_train_model_runs_in_explicit_fp32(tmp_path):
+    data_dir = _make_data_dir(tmp_path)
+    cfg = _tiny_cfg(data_dir, tmp_path / "run", amp_dtype="fp32")
+    assert train_model(cfg)["final_val_loss"] > 0
+
+
+def test_train_model_runs_with_qk_norm(tmp_path):
+    data_dir = _make_data_dir(tmp_path)
+    cfg = _tiny_cfg(data_dir, tmp_path / "run", qk_norm=True)
+    assert train_model(cfg)["final_val_loss"] > 0
