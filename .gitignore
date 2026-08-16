@@ -5,6 +5,7 @@ data/
 artifacts/
 runs/
 wandb/
+hf_cache/
 .venv/
 *.egg-info/
 
