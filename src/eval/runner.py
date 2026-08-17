@@ -15,12 +15,26 @@ benchmarks too.
 
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
+from typing import TextIO
 
 from src.eval.judge import Judge
 from src.eval.model_adapter import EvalModel
 from src.eval.tasks.base import Task
 from src.eval.types import Doc, EvalMode, RequestType, TaskResult
+
+
+def _reference_text(task: Task, doc: Doc) -> str | None:
+    """Best-effort gold-answer text for a doc, for sample logging -- None
+    for tasks with no fixed reference (e.g. alba.py, which doesn't
+    override doc_to_target since ALBA has none).
+    """
+    try:
+        return task.doc_to_target(doc)
+    except NotImplementedError:
+        return None
 
 
 def _sample_fewshot(docs: list[Doc], doc: Doc, k: int, rng: random.Random) -> list[Doc]:
@@ -67,7 +81,16 @@ def run_task(
     seed: int = 1234,
     judge: Judge | None = None,
     log_samples: bool = False,
+    samples_path: Path | None = None,
 ) -> TaskResult:
+    """samples_path: when given (with log_samples=True), every example is
+    streamed as one JSONL line to this file as it's scored, instead of
+    being held in TaskResult.samples -- full-dataset runs (thousands of
+    examples x many tasks x many checkpoints) would otherwise mean huge
+    in-memory lists and a bloated results.json. Falls back to the small
+    in-memory TaskResult.samples list when no path is given (tests,
+    --limit-scale smoke runs).
+    """
     docs = task.load_docs(limit)
     if not docs:
         return TaskResult(task.name, task.language, mode, num_fewshot, 0, {})
@@ -75,6 +98,10 @@ def run_task(
     rng = random.Random(seed)
     metric_totals: dict[str, list[float]] = {}
     samples = []
+    sample_file: TextIO | None = None
+    if log_samples and samples_path is not None:
+        samples_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_file = samples_path.open("a")
 
     for doc in docs:
         shots = _sample_fewshot(docs, doc, num_fewshot, rng)
@@ -101,7 +128,21 @@ def run_task(
             if v is not None:
                 metric_totals.setdefault(k, []).append(v)
         if log_samples:
-            samples.append({"idx": doc.idx, "prediction": prediction, "metrics": metrics})
+            record = {
+                "task": task.name,
+                "idx": doc.idx,
+                "context": context,
+                "prediction": prediction,
+                "reference": _reference_text(task, doc),
+                "metrics": metrics,
+            }
+            if sample_file is not None:
+                sample_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            else:
+                samples.append(record)
+
+    if sample_file is not None:
+        sample_file.close()
 
     aggregated = {k: sum(v) / len(v) for k, v in metric_totals.items() if v}
     return TaskResult(task.name, task.language, mode, num_fewshot, len(docs), aggregated, samples)

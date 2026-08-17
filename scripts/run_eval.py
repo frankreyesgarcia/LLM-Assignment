@@ -109,11 +109,14 @@ def main() -> None:
 
     results: dict[str, TaskResult] = {}
 
+    samples_path = lambda name: args.out_dir / f"{name}.samples.jsonl"  # noqa: E731
+
     for name in native_names:
         task = get_task(name)()
         print(f"\n[{name}] {mode.value}, {args.num_fewshot}-shot" + (f", limit={args.limit}" if args.limit else ""))
         result = run_task(
-            task, eval_model, mode, args.num_fewshot, args.limit, args.seed, judge, args.log_samples
+            task, eval_model, mode, args.num_fewshot, args.limit, args.seed, judge, args.log_samples,
+            samples_path(name) if args.log_samples else None,
         )
         results[name] = result
         print(f"[{name}] n={result.n_examples} {result.metrics}")
@@ -122,13 +125,17 @@ def main() -> None:
         from src.eval.tasks.spanish_bench import run_lm_eval_tasks
 
         print(f"\n[lm-eval] {lm_eval_names} -- {mode.value}, {args.num_fewshot}-shot")
-        results.update(
-            run_lm_eval_tasks(eval_model, mode, lm_eval_names, args.num_fewshot, args.limit, args.seed)
+        lm_eval_results = run_lm_eval_tasks(
+            eval_model, mode, lm_eval_names, args.num_fewshot, args.limit, args.seed,
+            args.log_samples, args.out_dir if args.log_samples else None,
         )
-        for name in lm_eval_names:
-            for task_name, result in results.items():
-                if task_name == name or task_name.startswith(f"{name}_"):
-                    print(f"[{task_name}] n={result.n_examples} {result.metrics}")
+        results.update(lm_eval_results)
+        # Printed straight from what lm-eval actually returned -- some
+        # requested names (e.g. "phrases_es") expand into differently-named
+        # sub-results ("phrases_es-va", "phrases_va-es"), so matching by
+        # string prefix against the requested names would miss them.
+        for task_name, result in lm_eval_results.items():
+            print(f"[{task_name}] n={result.n_examples} {result.metrics}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     report = {
@@ -136,7 +143,9 @@ def main() -> None:
         "mode": mode.value,
         "n_params": eval_model.n_params,
         "results": {
-            name: {k: v for k, v in asdict(r).items() if k != "samples" or args.log_samples}
+            # Per-example predictions live in <out-dir>/<task>.samples.jsonl when
+            # --log-samples is set (see runner.py), not embedded here.
+            name: {k: v for k, v in asdict(r).items() if k != "samples"}
             for name, r in results.items()
         },
     }

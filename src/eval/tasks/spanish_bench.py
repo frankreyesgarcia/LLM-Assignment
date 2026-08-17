@@ -16,6 +16,9 @@ that isn't a native task (see its --list-tasks / dispatch logic).
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import lm_eval
 
 from src.eval.lm_eval_adapter import LMEvalAdapter
@@ -47,7 +50,16 @@ def run_lm_eval_tasks(
     num_fewshot: int = 0,
     limit: int | None = None,
     seed: int = 1234,
+    log_samples: bool = False,
+    samples_dir: Path | None = None,
 ) -> dict[str, TaskResult]:
+    """samples_dir: when given (with log_samples=True), each task's
+    per-document results (lm-eval's own SampleResult shape -- doc,
+    target, raw+filtered model responses) are streamed to
+    <samples_dir>/<task_name>.samples.jsonl, mirroring how native tasks'
+    samples are logged in runner.py, for the same reason: full-dataset
+    runs are too big to hold in memory or embed in results.json.
+    """
     adapter = LMEvalAdapter(eval_model)
     output = lm_eval.simple_evaluate(
         model=adapter,
@@ -57,7 +69,7 @@ def run_lm_eval_tasks(
         apply_chat_template=(mode == EvalMode.POSTTRAIN),
         fewshot_as_multiturn=(mode == EvalMode.POSTTRAIN),
         bootstrap_iters=0,
-        log_samples=False,
+        log_samples=log_samples,
         random_seed=seed,
         numpy_random_seed=seed,
         torch_random_seed=seed,
@@ -66,6 +78,14 @@ def run_lm_eval_tasks(
     )
     if output is None:
         return {}
+
+    if log_samples and samples_dir is not None:
+        samples_dir.mkdir(parents=True, exist_ok=True)
+        for task_name, docs in output.get("samples", {}).items():
+            path = samples_dir / f"{task_name}.samples.jsonl"
+            with path.open("a") as f:
+                for doc in docs:
+                    f.write(json.dumps(doc, ensure_ascii=False, default=str) + "\n")
 
     n_samples = output.get("n-samples", {})
     results = {}
