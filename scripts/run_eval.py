@@ -114,10 +114,19 @@ def main() -> None:
     for name in native_names:
         task = get_task(name)()
         print(f"\n[{name}] {mode.value}, {args.num_fewshot}-shot" + (f", limit={args.limit}" if args.limit else ""))
-        result = run_task(
-            task, eval_model, mode, args.num_fewshot, args.limit, args.seed, judge, args.log_samples,
-            samples_path(name) if args.log_samples else None,
-        )
+        try:
+            result = run_task(
+                task, eval_model, mode, args.num_fewshot, args.limit, args.seed, judge, args.log_samples,
+                samples_path(name) if args.log_samples else None,
+            )
+        except Exception as e:
+            # One task's transient failure (e.g. a rate-limited dataset
+            # download) shouldn't cost the other 12+ tasks' worth of
+            # already-done compute for this checkpoint -- log it and move
+            # on; a missing task in results.json is easy to backfill later,
+            # redoing the whole checkpoint from scratch is not.
+            print(f"[{name}] FAILED: {e!r} -- skipping, other tasks continue")
+            continue
         results[name] = result
         print(f"[{name}] n={result.n_examples} {result.metrics}")
 

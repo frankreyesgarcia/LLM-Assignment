@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import csv
 import io
+import time
+from pathlib import Path
 
 import requests
 
@@ -29,6 +31,29 @@ from src.eval.tasks.base import Task
 from src.eval.types import Doc, RequestType
 
 PROMPTS_URL = "https://raw.githubusercontent.com/AMALIA-LLM/alba-benchmark/main/evaluation/alba_prompts.csv"
+# The 800 prompts never change mid-sweep, and load_docs runs once per
+# checkpoint -- fetching fresh every time means N-checkpoints-x-M-parallel-
+# shards worth of requests to the same GitHub URL in a burst, which GitHub
+# rate-limits (429, observed running 4 shards concurrently). Caching to
+# disk after the first fetch turns that into one request total per node.
+CACHE_PATH = Path.home() / ".cache" / "llm-und-eval" / "alba_prompts.csv"
+
+
+def _fetch_prompts_csv() -> str:
+    if CACHE_PATH.exists():
+        return CACHE_PATH.read_text()
+    last_error: Exception | None = None
+    for attempt in range(5):
+        try:
+            response = requests.get(PROMPTS_URL, timeout=30)
+            response.raise_for_status()
+            CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CACHE_PATH.write_text(response.text)
+            return response.text
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            time.sleep(2**attempt)  # 1s, 2s, 4s, 8s, 16s
+    raise RuntimeError(f"failed to fetch {PROMPTS_URL} after 5 attempts") from last_error
 
 
 @register("alba")
@@ -41,9 +66,7 @@ class ALBA(Task):
     needs_judge = True
 
     def load_docs(self, limit: int | None = None) -> list[Doc]:
-        response = requests.get(PROMPTS_URL, timeout=30)
-        response.raise_for_status()
-        reader = csv.DictReader(io.StringIO(response.text))
+        reader = csv.DictReader(io.StringIO(_fetch_prompts_csv()))
         rows = list(reader)
         if limit is not None:
             rows = rows[:limit]
