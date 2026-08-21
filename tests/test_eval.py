@@ -20,6 +20,9 @@ from src.eval.tasks.alba import ALBA
 from src.eval.tasks.base import Task
 from src.eval.tasks.calame_pt import CalamePT
 from src.eval.tasks.chatrag_hi import ChatRAGHi
+from src.eval.tasks.gsm8k import GSM8KHindi, GSM8KPortuguese, _last_number, _numbers_equal
+from src.eval.tasks.math_bench import MATHEnglish, _last_boxed, _normalize
+from src.eval.tasks.mmlu import MMLUHindi, MMLUPortuguese, MMLUSpanish
 from src.eval.tasks.pt_culture import PTCulture
 from src.eval.tasks.portugal_basic_qa import PortugalBasicQA
 from src.eval.tasks.spanish_bench import _clean_metrics
@@ -313,6 +316,81 @@ def test_chatrag_hi_context_block_and_f1():
     assert task.doc_to_target(doc) == "क्या आप योजना बना रहे हैं?"
     exact = task.process_result(doc, "क्या आप योजना बना रहे हैं?")["token_f1"]
     assert exact == 1.0
+
+
+def test_mmlu_gold_index_and_choices():
+    # Real openai/MMMLU PT_BR row shape.
+    row = {
+        "Question": "Encontre o ângulo para a extensão de campo dada Q(sqrt(2), sqrt(3), sqrt(18)) sobre Q.",
+        "A": "0", "B": "4", "C": "2", "D": "6",
+        "Answer": "B", "Subject": "abstract_algebra",
+    }
+    task = MMLUPortuguese()
+    doc = Doc(0, row)
+    assert task.doc_to_choices(doc) == ["0", "4", "2", "6"]
+    assert task.gold_index(doc) == 1
+    assert task.doc_to_text(doc).startswith("Pergunta: Encontre o ângulo")
+
+    # ES_LA/HI_IN share the same schema -- just different language/prompt.
+    assert MMLUSpanish().doc_to_text(doc).startswith("Pregunta:")
+    assert MMLUHindi().doc_to_text(doc).startswith("प्रश्न:")
+
+
+def test_gsm8k_number_extraction_helpers():
+    assert _last_number("so the answer is 1,234.5 dollars") == "1234.5"
+    assert _last_number("no numbers here") is None
+    assert _numbers_equal("18", "18.0") is True
+    assert _numbers_equal("18", "19") is False
+    assert _numbers_equal(None, "18") is False
+
+
+def test_gsm8k_hi_process_result():
+    # Real nvidia/GSM8K-Hi row shape.
+    row = {
+        "question": "जेनेट की बत्तखें प्रतिदिन 16 अंडे देती हैं।",
+        "answer": "जेनेट प्रतिदिन 16 - 3 - 4 = <<16-3-4=9>>9 बत्तख के अंडे बेचती है।\n\n#### 18",
+    }
+    task = GSM8KHindi()
+    doc = Doc(0, row)
+    assert task.doc_to_text(doc) == "प्रश्न: जेनेट की बत्तखें प्रतिदिन 16 अंडे देती हैं।\nउत्तर:"
+    assert task.doc_to_target(doc) == row["answer"]
+    assert task.process_result(doc, "चरण दर चरण... #### 18")["exact_match"] == 1.0
+    assert task.process_result(doc, "चरण दर चरण... #### 20")["exact_match"] == 0.0
+
+
+def test_gsm8k_pt_doc_to_text():
+    row = {"question": "Uma toga requer 2 rolos de fibra azul.", "answer": "...\n#### 3"}
+    task = GSM8KPortuguese()
+    doc = Doc(0, row)
+    assert task.doc_to_text(doc) == "Pergunta: Uma toga requer 2 rolos de fibra azul.\nResposta:"
+
+
+def test_math_last_boxed_handles_nesting():
+    assert _last_boxed(r"so \boxed{\frac{1}{2}} is the answer") == r"\frac{1}{2}"
+    assert _last_boxed("first \\boxed{1} then \\boxed{2}") == "2"
+    assert _last_boxed("no box here") is None
+
+
+def test_math_normalize_strips_spacing_noop_commands():
+    assert _normalize(r"\left( 3, \frac{\pi}{2} \right)") == _normalize(r"(3,\frac{\pi}{2})")
+
+
+def test_math_en_process_result():
+    # Real nlile/hendrycks-MATH-benchmark row shape.
+    row = {
+        "problem": "Convert the point (0,3) in rectangular coordinates to polar coordinates.",
+        "solution": r"...Therefore, the polar coordinates are $\boxed{\left( 3, \frac{\pi}{2} \right)}.$",
+        "answer": r"\left( 3, \frac{\pi}{2} \right)",
+        "subject": "Precalculus", "level": 2, "unique_id": "test/precalculus/807.json",
+    }
+    task = MATHEnglish()
+    doc = Doc(0, row)
+    assert task.doc_to_text(doc) == "Problem: Convert the point (0,3) in rectangular coordinates to polar coordinates.\nSolution:"
+    good = r"Step 1... final answer: \boxed{\left( 3, \frac{\pi}{2} \right)}"
+    assert task.process_result(doc, good)["exact_match"] == 1.0
+    bad = r"\boxed{(4, \pi)}"
+    assert task.process_result(doc, bad)["exact_match"] == 0.0
+    assert task.process_result(doc, "no box at all")["exact_match"] == 0.0
 
 
 # ---------------------------------------------------------------------------

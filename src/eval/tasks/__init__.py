@@ -5,6 +5,24 @@ class, then add one import line below -- scripts/run_eval.py --list-tasks
 and the runner pick it up automatically from there.
 """
 
-from src.eval.tasks import alba, calame_pt, chatrag_hi, portugal_basic_qa, pt_culture
+from src.eval.tasks import (
+    alba,
+    calame_pt,
+    chatrag_hi,
+    gsm8k,
+    math_bench,
+    mmlu,
+    portugal_basic_qa,
+    pt_culture,
+)
 
-__all__ = ["alba", "calame_pt", "chatrag_hi", "portugal_basic_qa", "pt_culture"]
+__all__ = [
+    "alba",
+    "calame_pt",
+    "chatrag_hi",
+    "gsm8k",
+    "math_bench",
+    "mmlu",
+    "portugal_basic_qa",
+    "pt_culture",
+]
