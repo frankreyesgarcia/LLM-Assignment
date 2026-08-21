@@ -307,6 +307,59 @@ satisfy $6ND \approx 10^{17}$; only the split differs), directionally
 consistent with Chinchilla's own finding that hand-picked shapes of that
 era tended to be oversized and undertrained relative to compute-optimal.
 
+## Task 4 — Evaluation harness
+
+`scripts/run_eval.py` evaluates a checkpoint against PT/ES/HI benchmarks,
+in either of two prompt formats (`--mode`):
+
+- `pretrain`: plain ICL/zero-shot text prompts, for checkpoints straight
+  off `scripts/train.py` that have never seen a chat template.
+- `posttrain`: chat-template prompts (`src/tokenizer/train.py::CHAT_TEMPLATE`),
+  answer read back out of the generated assistant turn, for
+  instruction-tuned checkpoints.
+
+Benchmarks are modular (`src/eval/tasks/`), each its own file behind a
+shared `Task` interface (`src/eval/tasks/base.py`) that a runner
+(`src/eval/runner.py`) drives identically regardless of benchmark:
+
+- `calame_pt` -- Portuguese next-word cloze (NOVA-vision-language/calame-pt)
+- `portugal_basic_qa` -- 3-way MC Portuguese trivia (duarteocarmo/portugal-basic-qa-ptcore)
+- `pt_culture` -- multi-turn Portuguese culture QA (duarteocarmo/PT-Culture_Data)
+- `alba` -- open-ended European Portuguese prompts, LLM-judge scored 1-5
+  (AMALIA-LLM/alba-benchmark); runs generation-only (no judge_score) unless
+  `--judge anthropic` is passed
+- `chatrag_hi` -- Hindi multi-turn RAG QA across 8 source configs (nvidia/ChatRAG-Hi)
+- any [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+  task name, e.g. `spanish_bench` or an individual sub-task like `xnli_es`
+  -- rather than reimplementing spanish_bench's ~30 task variants, our
+  checkpoint is handed to lm-eval directly via a `TemplateLM` adapter
+  (`src/eval/lm_eval_adapter.py`), so the real, maintained suite runs in
+  both eval modes
+
+```bash
+# Native PT/HI benchmarks, zero-shot ICL, on a pretrain checkpoint
+uv run scripts/run_eval.py --ckpt runs/train/ckpt.pt --mode pretrain \
+    --tasks calame_pt,portugal_basic_qa,pt_culture,chatrag_hi --num-fewshot 0
+
+# Full Spanish suite, chat-template mode, on an SFT checkpoint
+uv run scripts/run_eval.py --ckpt runs/sft/ckpt.pt --mode posttrain \
+    --tasks spanish_bench --num-fewshot 0 --limit 50
+
+# ALBA with an LLM judge (needs ANTHROPIC_API_KEY)
+uv run scripts/run_eval.py --ckpt runs/train/ckpt.pt --mode pretrain \
+    --tasks alba --judge anthropic --limit 20
+
+uv run scripts/run_eval.py --list-tasks
+
+# tests (offline synthetic fixtures matching each dataset's real schema, no network)
+uv run pytest tests/test_eval.py -v
+```
+
+Adding a benchmark means writing one `tasks/*.py` file with a
+`@register("name")` `Task` subclass (or, for an lm-eval-covered language,
+nothing at all -- any lm-eval task name just works) -- the CLI, runner,
+and report format never change.
+
 ## Known findings (2026-07-17)
 
 - Measured hi-fineweb2/hi-sangraha overlap by hand (custom exact + MinHash
