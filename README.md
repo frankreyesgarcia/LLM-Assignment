@@ -329,6 +329,13 @@ shared `Task` interface (`src/eval/tasks/base.py`) that a runner
   (AMALIA-LLM/alba-benchmark); runs generation-only (no judge_score) unless
   `--judge anthropic` is passed
 - `chatrag_hi` -- Hindi multi-turn RAG QA across 8 source configs (nvidia/ChatRAG-Hi)
+- `mmlu_pt` / `mmlu_es` / `mmlu_hi` -- 4-way MC general knowledge (openai/MMMLU,
+  OpenAI's own translation of cais/mmlu, row-aligned across languages)
+- `gsm8k_hi` / `gsm8k_pt` -- chain-of-thought grade-school math (nvidia/GSM8K-Hi,
+  Polygl0t/gsm8k-pt); no Spanish entry, `mgsm_direct_es` (spanish_bench) already
+  covers that
+- `math_en` -- Hendrycks MATH (nlile/hendrycks-MATH-benchmark), kept unlocalized
+  since no PT/ES/HI translation of competition-math LaTeX exists
 - any [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
   task name, e.g. `spanish_bench` or an individual sub-task like `xnli_es`
   -- rather than reimplementing spanish_bench's ~30 task variants, our
