@@ -202,6 +202,34 @@
       <tbody id="diffTableBody"></tbody>
     </table>
   </div>
+
+  <h2 class="section-title">New benchmarks — final checkpoint only, iteration 259,653</h2>
+  <p class="subtitle">
+    Translated MMLU / GSM8K / MATH, added after the 80-checkpoint sweep and
+    evaluated only against <code>ckpt_final.pt</code> (no sweep across
+    training, so there is no "best iteration" to compare against). MMLU-pt/es/hi
+    is <a href="https://huggingface.co/datasets/openai/MMMLU" target="_blank" rel="noopener">openai/MMMLU</a>
+    (official row-aligned translation of <code>cais/mmlu</code>, configs
+    <code>PT_BR</code>/<code>ES_LA</code>/<code>HI_IN</code>), full dataset (14,042
+    rows) uncapped. GSM8K-hi/pt use
+    <a href="https://huggingface.co/datasets/nvidia/GSM8K-Hi" target="_blank" rel="noopener">nvidia/GSM8K-Hi</a>
+    and
+    <a href="https://huggingface.co/datasets/Polygl0t/gsm8k-pt" target="_blank" rel="noopener">Polygl0t/gsm8k-pt</a>.
+    MATH has no target-language translation available, so it ran in English
+    only on
+    <a href="https://huggingface.co/datasets/nlile/hendrycks-MATH-benchmark" target="_blank" rel="noopener">nlile/hendrycks-MATH-benchmark</a>.
+    Zero-shot, generative (greedy decode, last-number / last-<code>\boxed{}</code>
+    grading). All three MMLU translations sit near the 25% random-guess floor
+    (4-choice); all three math benchmarks are effectively 0% — this pretrain-only
+    checkpoint has no reliable multi-step reasoning, consistent with the MGSM-es
+    result above.
+  </p>
+  <div class="diff-table-wrap">
+    <table>
+      <thead><tr><th>Benchmark</th><th>Metric</th><th class="num">Value (n)</th></tr></thead>
+      <tbody id="newBenchTableBody"></tbody>
+    </table>
+  </div>
 </div>
 
 <div class="tooltip" id="tooltip"></div>
@@ -212,6 +240,14 @@ const PANELS = [{"task": "calame_pt", "metric": "accuracy", "label": "CALAME-PT"
 const FINAL_ITER = 259653;
 const TOTAL_CKPTS = 80;
 const DONE_CKPTS = 80;
+const NEW_BENCH_ROWS = [
+  {"label": "MMLU-pt", "metric": "accuracy", "n": 14042, "value": 0.2338698191140863},
+  {"label": "MMLU-es", "metric": "accuracy", "n": 14042, "value": 0.2454778521578123},
+  {"label": "MMLU-hi", "metric": "accuracy", "n": 14042, "value": 0.23835635949294973},
+  {"label": "GSM8K-hi", "metric": "exact_match", "n": 1319, "value": 0.00530705079605762},
+  {"label": "GSM8K-pt", "metric": "exact_match", "n": 1295, "value": 0.009266409266409266},
+  {"label": "MATH-en", "metric": "exact_match", "n": 500, "value": 0.0}
+];
 
 const svgns = "http://www.w3.org/2000/svg";
 const grid = document.getElementById("grid");
@@ -396,7 +432,25 @@ function buildDiffTable() {
   });
 }
 
+function buildNewBenchTable() {
+  const body = document.getElementById("newBenchTableBody");
+  NEW_BENCH_ROWS.forEach(r => {
+    const tr = document.createElement("tr");
+    const nameTd = document.createElement("td");
+    nameTd.textContent = r.label;
+    const metricTd = document.createElement("td");
+    metricTd.className = "muted";
+    metricTd.textContent = r.metric;
+    const valTd = document.createElement("td");
+    valTd.className = "num";
+    valTd.textContent = `${fmt(r.value)} (n=${r.n.toLocaleString("en-US")})`;
+    tr.appendChild(nameTd); tr.appendChild(metricTd); tr.appendChild(valTd);
+    body.appendChild(tr);
+  });
+}
+
 buildStatus();
 buildGrid();
 buildDiffTable();
+buildNewBenchTable();
 </script>
