@@ -206,6 +206,7 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
 
     history: list[dict] = []
     start = time.time()
+    tokens_per_iter = cfg.batch_size * cfg.block_size
 
     try:
         for it in range(start_iter, cfg.max_iters):
@@ -215,16 +216,42 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
 
             if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
                 losses = estimate_sft_loss(model, tokens, labels, cfg, device, eos_id, amp_dtype)
-                record = {"iter": it, "train_loss": losses["train"], "val_loss": losses["val"], "lr": lr}
+                # tokens_seen counts from iter 0 (so it stays comparable across a
+                # resumed run), elapsed_s only this submission's wall clock -- same
+                # split as src/model/train.py, minus its elapsed_offset_s since the
+                # SFT checkpoints don't carry one.
+                elapsed_s = time.time() - start
+                tokens_seen = it * tokens_per_iter
+                record = {
+                    "iter": it,
+                    "train_loss": losses["train"],
+                    "val_loss": losses["val"],
+                    "lr": lr,
+                    "tokens_seen": tokens_seen,
+                    "elapsed_s": elapsed_s,
+                }
                 history.append(record)
                 if cfg.log_every_eval:
-                    print(f"iter {it:5d} | train_loss {losses['train']:.4f} | val_loss {losses['val']:.4f} | lr {lr:.2e}")
+                    print(
+                        f"iter {it:5d} | train_loss {losses['train']:.4f} | "
+                        f"val_loss {losses['val']:.4f} | lr {lr:.2e} | tokens {tokens_seen:,}"
+                    )
                 if log_path is not None:
                     with open(log_path, "a") as f:
                         f.write(json.dumps(record) + "\n")
                 if wandb_run is not None:
                     wandb_run.log(
-                        {"train/loss": losses["train"], "val/loss": losses["val"], "lr": lr},
+                        {
+                            "train/loss": losses["train"],
+                            "train/perplexity": float(np.exp(losses["train"])),
+                            "val/loss": losses["val"],
+                            "val/perplexity": float(np.exp(losses["val"])),
+                            "val/best_loss": min(best_val_loss, losses["val"]),
+                            "lr": lr,
+                            "tokens_seen": tokens_seen,
+                            "tokens_per_sec": tokens_seen / elapsed_s if elapsed_s > 0 else 0.0,
+                            "elapsed_s": elapsed_s,
+                        },
                         step=it,
                     )
                 if out_dir is not None and losses["val"] < best_val_loss:
@@ -277,6 +304,9 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
             wandb_run.summary["final_train_loss"] = final["train"]
             wandb_run.summary["final_val_loss"] = final["val"]
             wandb_run.summary["best_val_loss"] = min(best_val_loss, final["val"])
+            wandb_run.summary["final_val_perplexity"] = float(np.exp(final["val"]))
+            wandb_run.summary["tokens_seen"] = cfg.max_iters * tokens_per_iter
+            wandb_run.summary["elapsed_s"] = elapsed_s
     finally:
         if wandb_run is not None:
             wandb_run.finish()

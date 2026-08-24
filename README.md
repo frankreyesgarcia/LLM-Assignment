@@ -405,6 +405,29 @@ uv run scripts/train_sft.py --init-from runs/train/ckpt_final.pt \
 uv run pytest tests/test_sft.py -v
 ```
 
+On Berzelius, run both stages as batch jobs -- neither belongs on a login
+node (the data prep scans EuroBlocks' full 1.09M-row stream; training
+needs a GPU the login node doesn't have):
+
+```bash
+# smoke-test the data path first (--limit 200/source, writes data/sft_smoke)
+sbatch --export=ALL,SFT_LIMIT=200 scripts/slurm/13_prepare_sft_data.sh
+
+# real run: prepare, then fine-tune once that succeeds
+JOB1=$(sbatch --parsable scripts/slurm/13_prepare_sft_data.sh)
+sbatch --dependency=afterok:$JOB1 scripts/slurm/14_train_sft.sh
+```
+
+`14_train_sft.sh` derives `--max-iters` from `data/sft/meta.json`'s token
+count rather than hardcoding it (`SFT_EPOCHS`, default 2 -- SFT is
+epoch-shaped over a fixed corpus, unlike pretraining's FLOPs budget over
+an effectively unbounded stream), and logs to W&B unconditionally.
+`SFT_DRYRUN=1` runs 20 iterations into a separate `runs/sft_dryrun`
+out-dir -- separate because resume-on-resubmit is on by default, so a real
+run pointed at a directory holding a dry run's `ckpt_last.pt` would
+silently continue from it. Size `#SBATCH --time` from the `tokens_per_sec`
+that dry run reports before submitting the real job.
+
 `scripts/prepare_sft_data.py` renders each conversation turn-by-turn with
 the same wrapping `CHAT_TEMPLATE` uses, masking every token outside an
 assistant turn to `-1` (`labels.bin`, a signed dtype unlike the token
