@@ -75,10 +75,17 @@ class SFTTrainConfig:
     wandb_dir: Path | None = None
 
 
-def load_sft_data(data_dir: Path) -> tuple[dict[str, np.memmap], dict[str, np.memmap], dict]:
+def load_sft_data(
+    data_dir: Path, block_size: int
+) -> tuple[dict[str, np.memmap], dict[str, np.memmap], dict[str, np.ndarray | None], dict]:
     """Memory-map the train/val token + label streams written by
     scripts/prepare_sft_data.py. Labels are int16 (signed, unlike the
     uint16 token stream) so -1 ("no loss here") is representable.
+
+    Also loads `{split}_starts.bin`, the offset of every conversation's
+    first token, which get_sft_batch samples windows from. Older data
+    directories predate that stream; they load with starts=None and fall
+    back to uniform offsets (see get_sft_batch).
     """
     meta = json.loads((data_dir / "meta.json").read_text())
     tokens = {
@@ -87,13 +94,49 @@ def load_sft_data(data_dir: Path) -> tuple[dict[str, np.memmap], dict[str, np.me
     labels = {
         split: np.memmap(data_dir / f"{split}_labels.bin", dtype=np.int16, mode="r") for split in ("train", "val")
     }
-    return tokens, labels, meta
+    starts: dict[str, np.ndarray | None] = {}
+    for split in ("train", "val"):
+        path = data_dir / f"{split}_starts.bin"
+        if not path.exists():
+            print(
+                f"WARNING: {path} not found -- falling back to uniform random offsets, which start "
+                f"part-way into a conversation almost every time, supervising assistant tokens whose "
+                f"prompt is outside the window. Re-run scripts/prepare_sft_data.py to fix."
+            )
+            starts[split] = None
+            continue
+        # A window starting at `start` reads tokens[start : start+block_size]
+        # and labels[start+1 : start+1+block_size], so starts too close to
+        # the end of the stream can't be used.
+        offsets = np.fromfile(path, dtype=np.int64)
+        usable = offsets[offsets < len(tokens[split]) - block_size - 1]
+        if len(usable) == 0:
+            raise ValueError(
+                f"no usable conversation start offsets in {path} for block_size {block_size} -- "
+                f"the {split} split ({len(tokens[split]):,} tokens) is shorter than one window"
+            )
+        starts[split] = usable
+    return tokens, labels, starts, meta
 
 
 def get_sft_batch(
-    tokens: np.memmap, labels: np.memmap, block_size: int, batch_size: int, device: torch.device
+    tokens: np.memmap,
+    labels: np.memmap,
+    block_size: int,
+    batch_size: int,
+    device: torch.device,
+    starts: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    ix = torch.randint(len(tokens) - block_size - 1, (batch_size,))
+    # Window starts land on conversation boundaries when prepare_sft_data.py
+    # recorded them: a uniform offset into the packed stream begins part-way
+    # into a conversation 99.8% of the time (measured), which supervises that
+    # conversation's assistant tokens with its user turn outside the window.
+    # Starting on a boundary means the only conversation a window can cut is
+    # the last one, losing the tail of an answer rather than the prompt.
+    if starts is not None:
+        ix = torch.from_numpy(starts[torch.randint(len(starts), (batch_size,)).numpy()])
+    else:
+        ix = torch.randint(len(tokens) - block_size - 1, (batch_size,))
     x = torch.stack([torch.from_numpy(tokens[i : i + block_size].astype(np.int64)) for i in ix])
     # Target for position i is the label of the *next* token (i+1) -- same
     # shift convention as src/model/train.py::get_batch, just reading the
@@ -112,6 +155,7 @@ def estimate_sft_loss(
     model: GPT,
     tokens: dict[str, np.memmap],
     labels: dict[str, np.memmap],
+    starts: dict[str, np.ndarray | None],
     cfg: SFTTrainConfig,
     device: torch.device,
     eos_id: int | None,
@@ -122,7 +166,9 @@ def estimate_sft_loss(
     for split in tokens:
         losses = torch.zeros(cfg.eval_iters)
         for i in range(cfg.eval_iters):
-            x, y = get_sft_batch(tokens[split], labels[split], cfg.block_size, cfg.batch_size, device)
+            x, y = get_sft_batch(
+                tokens[split], labels[split], cfg.block_size, cfg.batch_size, device, starts[split]
+            )
             doc_id = document_ids(x, eos_id) if eos_id is not None else None
             with autocast_for(device, amp_dtype):
                 _, loss = model(x, y, doc_id=doc_id)
@@ -152,7 +198,7 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
     if device.type == "cuda":
         enable_tf32()
 
-    tokens, labels, meta = load_sft_data(cfg.data_dir)
+    tokens, labels, starts, meta = load_sft_data(cfg.data_dir, cfg.block_size)
     model, model_cfg = load_base_checkpoint(cfg.init_from, device)
     if model_cfg.vocab_size != meta["vocab_size"]:
         raise ValueError(
@@ -215,7 +261,7 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
                 group["lr"] = lr
 
             if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
-                losses = estimate_sft_loss(model, tokens, labels, cfg, device, eos_id, amp_dtype)
+                losses = estimate_sft_loss(model, tokens, labels, starts, cfg, device, eos_id, amp_dtype)
                 # tokens_seen counts from iter 0 (so it stays comparable across a
                 # resumed run), elapsed_s only this submission's wall clock -- same
                 # split as src/model/train.py, minus its elapsed_offset_s since the
@@ -273,7 +319,9 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
                     out_dir / "ckpt_last.pt",
                 )
 
-            x, y = get_sft_batch(tokens["train"], labels["train"], cfg.block_size, cfg.batch_size, device)
+            x, y = get_sft_batch(
+                tokens["train"], labels["train"], cfg.block_size, cfg.batch_size, device, starts["train"]
+            )
             doc_id = document_ids(x, eos_id) if eos_id is not None else None
             with autocast_for(device, amp_dtype):
                 _, loss = model(x, y, doc_id=doc_id)
@@ -287,7 +335,7 @@ def train_sft_model(cfg: SFTTrainConfig) -> dict:
             if cfg.progress_every and (it + 1) % cfg.progress_every == 0:
                 print(f"iter {it + 1:6d}/{cfg.max_iters} | loss {loss.item():.4f} | lr {lr:.2e}", flush=True)
 
-        final = estimate_sft_loss(model, tokens, labels, cfg, device, eos_id, amp_dtype)
+        final = estimate_sft_loss(model, tokens, labels, starts, cfg, device, eos_id, amp_dtype)
         elapsed_s = time.time() - start
         if out_dir is not None:
             torch.save(

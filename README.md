@@ -428,6 +428,30 @@ run pointed at a directory holding a dry run's `ckpt_last.pt` would
 silently continue from it. Size `#SBATCH --time` from the `tokens_per_sec`
 that dry run reports before submitting the real job.
 
+**Context window and over-length conversations.** The base checkpoint's
+`block_size` is 1024 and `src/model/gpt.py` uses *learned* positional
+embeddings, so 1024 is a hard ceiling -- `train_sft.py` refuses a larger
+`--block-size`. Two things follow, both of which the pipeline handles
+explicitly rather than silently:
+
+- `--max-example-tokens 1024` drops conversations that can't fit whole,
+  counting them per source in `meta.json`. Without it they aren't
+  truncated or dropped -- they're split across windows, so every fragment
+  after the first supervises assistant tokens whose prompt is out of
+  view. On the unfiltered corpus that was 48.7% of conversations holding
+  81.6% of all tokens.
+- Training windows start at conversation boundaries (`{split}_starts.bin`),
+  not at uniform offsets into the packed stream. Dropping over-length
+  conversations is not sufficient on its own: measured on the filtered
+  corpus, uniform offsets still began mid-conversation in 99.8% of windows,
+  with 33.8% of the average window being orphaned tokens.
+
+`meta.json` records per-source and per-language example/token/supervised-token
+counts (at sub-source granularity, e.g. `smoltalk2pt/magpie_ultra`), the
+conversation-length percentiles, and what was dropped -- so the mix that
+actually reached training is recoverable from the output rather than needing
+a separate audit.
+
 `scripts/prepare_sft_data.py` renders each conversation turn-by-turn with
 the same wrapping `CHAT_TEMPLATE` uses, masking every token outside an
 assistant turn to `-1` (`labels.bin`, a signed dtype unlike the token

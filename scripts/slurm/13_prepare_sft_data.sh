@@ -77,9 +77,18 @@ if [ -n "${SFT_LIMIT:-}" ]; then
     echo "SMOKE RUN: --limit $SFT_LIMIT, writing to $OUT_DIR (not the real data/sft)"
 fi
 
+# --max-example-tokens 1024 = the base checkpoint's block_size, which is
+# also the training window (see 14_train_sft.sh). A conversation longer
+# than that cannot be seen whole: nothing truncates it, so it would be
+# split across windows, and every fragment after the first supervises
+# assistant tokens whose user turn is outside the window. Measured on the
+# unfiltered corpus, 48.7% of conversations were over-length and held
+# 81.6% of all tokens -- so this is the common case, not an edge case.
+# Keep this in sync with 14_train_sft.sh's BLOCK_SIZE.
 uv run scripts/prepare_sft_data.py \
     --tokenizer-dir "$SOURCE_STORAGE/artifacts/tokenizer" \
     --out-dir "$OUT_DIR" \
+    --max-example-tokens 1024 \
     "${LIMIT_ARGS[@]}"
 
 echo "Packed SFT data under: $OUT_DIR"
