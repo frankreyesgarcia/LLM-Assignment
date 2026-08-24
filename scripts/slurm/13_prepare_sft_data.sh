@@ -9,25 +9,33 @@
 # EuroBlocks alone is a 1.09M-row single stream that has to be scanned end
 # to end just to filter the pt/es rows out of it.
 #
-# --cpus-per-task=16: unlike scripts/slurm/06_prepare_pretrain_full.sh
+# --cpus-per-task=4: unlike scripts/slurm/06_prepare_pretrain_full.sh
 # (which feeds tokenizers' Rust backend whole batches via
 # batch_encode_plus and so scales with cores), prepare_sft_data.py renders
 # one conversation at a time in Python (src/sft/render.py has to interleave
 # per-turn label masks with the token ids, which the batch API can't
 # express), so the tokenization itself is effectively single-threaded.
-# The extra cores are for the HF datasets/parquet reader underneath it,
-# not the tokenizer -- don't expect this to speed up with more.
+# The few cores here are for the HF datasets/parquet reader underneath it,
+# not the tokenizer -- asking for more buys nothing and makes this job
+# much harder to schedule: at 16 it sat behind a full berzelius-cpu
+# partition with an estimated 5h wait, where a 4-CPU request backfills
+# into a gap almost immediately.
 #
-# --mem=64G: prepare_sft_data.py holds every rendered example in a Python
+# --mem=16G: prepare_sft_data.py holds every rendered example in a Python
 # list (token ids + labels) before packing, so peak RSS scales with the
-# whole SFT corpus rather than with a streaming window. Measured, not
-# estimated: the full run (316,124 examples, 504M tokens across both
-# splits) peaked at 24.6GB (`sacct -j <id> --format=MaxRSS`). 64G is ~2.5x
-# that, which leaves room for the corpus to grow as sources are added to
-# src/sft/sources/ -- raise it if a new source pushes MaxRSS close.
+# whole retained corpus rather than with a streaming window. Measured, not
+# estimated: with --max-example-tokens 1024 the full run peaked at 5.9GB
+# (`sacct -j <id> --format=MaxRSS`), since an over-length conversation is
+# dropped before it is ever appended. Without that filter the same run
+# peaked at 24.6GB. 16G is ~2.7x the measured figure, leaving room for the
+# corpus to grow as sources are added to src/sft/sources/ -- raise it if a
+# new source pushes MaxRSS close, and note it must go back above ~32G if
+# the length filter is ever removed.
 #
-# --time=02:00:00: the full run took 23m49s wall clock (316,124 examples ->
-# 504M tokens), so this is ~5x measured. The generous multiple is because
+# --time=02:00:00: the full run took 18m41s wall clock at 4 CPUs (162,075
+# examples retained of 316,124 rendered), so this is ~6x measured -- and
+# note it was *faster* than the same job at 16 CPUs (23m49s), confirming
+# the cores above buy nothing. The generous multiple is because
 # most of that time is HF dataset download/scan, which is only that fast
 # with the sources already in $HF_HOME -- a cold cache on a fresh
 # $PROJECT_STORAGE re-downloads EuroBlocks' full 1.09M-row stream.
@@ -48,8 +56,8 @@
 #SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
 #SBATCH --partition=berzelius-cpu
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
 #SBATCH --time=02:00:00              # ~5x the measured 23m49s -- see comment above
 #SBATCH --output=runs/%j-13_prepare_sft.out
 #SBATCH --error=runs/%j-13_prepare_sft.err
