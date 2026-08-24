@@ -13,15 +13,15 @@ that script's docstring), with two differences:
    it's part of an assistant turn (src/sft/render.py), so training only
    computes loss on what the model actually needs to learn to produce.
 
-2. A third stream, `{split}_starts.bin` (int64), holds the offset of every
-   conversation's first token. src/model/train_sft.py samples training
-   windows starting at those offsets rather than at an arbitrary token
-   index: with uniform offsets, 99.8% of windows begin part-way into a
-   conversation, so its assistant tokens get supervised with the user turn
-   that prompted them sitting outside the window (measured on this
-   corpus: 33.8% of the average window). Sampling on boundaries makes
-   that 0% -- the only conversation a window can cut is the last one, and
-   that loses the tail of an answer, not the prompt.
+2. A third stream, `{split}_index.bin`, is (N, 2) int64: the (start,
+   length) of every conversation in the token stream. Training batches one
+   conversation per row (src/model/train_sft.py::get_sft_batch), padded to
+   the longest in the batch -- so the index, not an offset into the packed
+   stream, is what a batch is built from. Sampling fixed-size windows out
+   of the stream instead would cut conversations at the window edge: with
+   a 1024 window over this corpus, 99.8% of windows began part-way into a
+   conversation, supervising assistant tokens whose prompt sat outside the
+   window.
 
 3. Each conversation is separated by the tokenizer's EOS token (exactly
    like pretraining separates documents), NOT the EOT token that also
@@ -76,6 +76,7 @@ def run(
     tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
     assert tokenizer.vocab_size < 2**16, "uint16 packing assumes vocab_size < 65536"
     eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else eos_id
 
     print(f"Loading + rendering examples from {sources} (languages={languages or 'all'})...")
     examples = []  # list of (token_ids, labels, source, language)
@@ -119,6 +120,11 @@ def run(
     per_language: dict[str, dict] = {}
     meta = {
         "vocab_size": tokenizer.vocab_size,
+        # Padding id for the batcher. Any masked-out id would do (labels are
+        # -1 there and per-document attention masking keeps real tokens from
+        # attending to it), but a real pad token keeps the packed streams
+        # readable when inspected by hand.
+        "pad_token_id": pad_id,
         "tokenizer_dir": str(tokenizer_dir),
         "eos_token_id": eos_id,
         "ignore_index": -1,
@@ -132,7 +138,7 @@ def run(
         n_tokens = sum(len(examples[i][0]) + 1 for i in idx)  # +1 per example for the EOS separator
         tokens_arr = np.empty(n_tokens, dtype=np.uint16)
         labels_arr = np.empty(n_tokens, dtype=np.int16)
-        starts_arr = np.empty(len(idx), dtype=np.int64)
+        index_arr = np.empty((len(idx), 2), dtype=np.int64)  # (start, length) per conversation
         pos = 0
         # Per-source/per-language accounting: which datasets actually made it
         # into this corpus, and in what proportion. Without it the output is
@@ -144,7 +150,7 @@ def run(
         for n_written, i in enumerate(idx):
             token_ids, labels, source, language = examples[i]
             n = len(token_ids)
-            starts_arr[n_written] = pos
+            index_arr[n_written] = (pos, n)
             n_sup = sum(1 for label in labels if label != -1)
             for bucket, key in ((per_source, source), (per_language, language)):
                 entry = bucket.setdefault(
@@ -161,7 +167,7 @@ def run(
             pos += n + 1
         tokens_arr.tofile(out_dir / f"{split_name}.bin")
         labels_arr.tofile(out_dir / f"{split_name}_labels.bin")
-        starts_arr.tofile(out_dir / f"{split_name}_starts.bin")
+        index_arr.tofile(out_dir / f"{split_name}_index.bin")
         meta[f"{split_name}_examples"] = len(idx)
         meta[f"{split_name}_tokens"] = int(n_tokens)
         n_supervised = int((labels_arr != -1).sum())

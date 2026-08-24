@@ -297,28 +297,29 @@ def test_prepare_sft_data_drops_over_length_examples(tmp_path):
         sft_registry._REGISTRY.pop("fake_long", None)
 
 
-def test_sft_batches_start_on_conversation_boundaries(tmp_path):
-    """get_sft_batch must sample windows at conversation starts: a uniform
-    offset into the packed stream lands mid-conversation nearly always,
-    supervising assistant tokens whose prompt is outside the window."""
+def test_sft_batches_are_whole_padded_conversations(tmp_path):
+    """One row = one whole conversation, right-padded to the longest in the
+    batch, with padding masked out of both the loss and attention."""
     import numpy as np
+    import torch
 
-    from src.model.train_sft import get_sft_batch, load_sft_data
+    from src.model.train_sft import get_sft_batch, length_grouped_batches, load_sft_data
     import scripts.prepare_sft_data as prep
 
-    @sft_registry.register("fake_boundary")
-    class FakeBoundary(SFTSource):
+    @sft_registry.register("fake_batch")
+    class FakeBatch(SFTSource):
         languages = ("pt",)
 
         def load_examples(self, limit=None):
+            # Deliberately varied lengths, so batches actually need padding.
             for i in range(200):
                 yield SFTExample(
                     messages=[
                         {"role": "user", "content": "Olá, tudo bem?"},
-                        {"role": "assistant", "content": f"Sim, tudo ótimo, obrigado! {i}"},
+                        {"role": "assistant", "content": "Sim, tudo ótimo, obrigado! " * (1 + i % 7)},
                     ],
                     language="pt",
-                    source="fake_boundary",
+                    source="fake_batch",
                     raw={},
                 )
 
@@ -331,7 +332,7 @@ def test_sft_batches_start_on_conversation_boundaries(tmp_path):
 
         out_dir = tmp_path / "sft"
         prep.run(
-            sources=["fake_boundary"],
+            sources=["fake_batch"],
             languages=None,
             tokenizer_dir=tokenizer_dir,
             out_dir=out_dir,
@@ -340,27 +341,65 @@ def test_sft_batches_start_on_conversation_boundaries(tmp_path):
             seed=0,
         )
 
-        block_size = 16
-        tokens, labels, starts, meta = load_sft_data(out_dir, block_size)
-        assert starts["train"] is not None
+        tokens, labels, index, meta = load_sft_data(out_dir)
+        pad_id = meta["pad_token_id"]
+        assert index["train"].shape[1] == 2
 
-        import torch
-
-        x, y = get_sft_batch(
-            tokens["train"], labels["train"], block_size, 32, torch.device("cpu"), starts["train"]
+        batch_size = 8
+        rng = np.random.default_rng(0)
+        batches = length_grouped_batches(index["train"][:, 1], batch_size, rng, megabatch_factor=4)
+        batch_idx = next(batches)
+        x, y, doc_id = get_sft_batch(
+            tokens["train"], labels["train"], index["train"], batch_idx, 1024, pad_id, torch.device("cpu")
         )
-        assert x.shape == (32, block_size)
 
-        # Every sampled window must begin at a recorded conversation start.
-        stream = np.asarray(tokens["train"])
-        valid = set(starts["train"].tolist())
-        for row in x:
-            matches = np.flatnonzero(stream[: len(stream) - block_size] == int(row[0]))
-            assert any(int(m) in valid for m in matches)
+        lengths = index["train"][batch_idx, 1]
+        assert x.shape == (batch_size, int(lengths.max()))
 
-        # And the first token of a window is never mid-assistant-turn: the
-        # conversation's opening tokens are always masked (the user turn).
+        for row, length in enumerate(lengths):
+            start = int(index["train"][batch_idx[row], 0])
+            # The row holds exactly this conversation, from its first token.
+            assert (x[row, :length].numpy() == np.asarray(tokens["train"][start : start + length])).all()
+            # Everything past it is padding: masked out of the loss...
+            assert (x[row, length:] == pad_id).all()
+            assert (y[row, length:] == -1).all()
+
+        # ...and out of attention, via a distinct document id.
+        if doc_id is not None:
+            for row, length in enumerate(lengths):
+                assert (doc_id[row, :length] == 0).all()
+                assert (doc_id[row, length:] == 1).all()
+
+        # A batch never opens mid-answer: position 0 is always a masked
+        # (non-assistant) token, since every conversation starts with a user turn.
         assert (y[:, 0] == -1).all()
     finally:
-        for name in ("fake_boundary",):
-            sft_registry._REGISTRY.pop(name, None)
+        sft_registry._REGISTRY.pop("fake_batch", None)
+
+
+def test_length_grouped_batches_keep_padding_low():
+    """The point of length grouping: batches of similar-length rows, so
+    padding to the longest in the batch wastes almost nothing."""
+    import numpy as np
+
+    from src.model.train_sft import length_grouped_batches
+
+    rng = np.random.default_rng(0)
+    lengths = rng.integers(20, 1024, size=4000)
+    batch_size = 16
+
+    grouped = length_grouped_batches(lengths, batch_size, np.random.default_rng(0))
+    fill = []
+    for _ in range(100):
+        b = lengths[next(grouped)]
+        fill.append(b.sum() / (b.max() * batch_size))
+    grouped_fill = float(np.mean(fill))
+
+    random_fill = float(
+        np.mean([
+            (lambda b: b.sum() / (b.max() * batch_size))(rng.choice(lengths, batch_size))
+            for _ in range(100)
+        ])
+    )
+    assert grouped_fill > 0.95, grouped_fill
+    assert grouped_fill > random_fill + 0.2, (grouped_fill, random_fill)

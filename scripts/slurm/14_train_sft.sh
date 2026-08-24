@@ -22,9 +22,10 @@
 # unbounded stream. SFT_EPOCHS below sets how many passes over
 # data/sft/train.bin that works out to; 2 is the conventional default for
 # instruction tuning (1 often underfits the chat format, 3+ starts
-# overfitting a corpus this size). Note get_sft_batch samples *random*
-# windows rather than walking the stream, so an "epoch" here means an
-# equivalent token budget, not a guaranteed single visit to every token.
+# overfitting a corpus this size). One row of a batch is one whole
+# conversation, so an epoch is train_examples/batch_size steps and really
+# is one visit to each conversation (bar the per-megabatch remainder that
+# length grouping drops).
 #
 # --lr 5e-5 / --min-lr 5e-6 are scripts/train_sft.py's defaults, i.e. the
 # conventional ~10x-below-pretraining starting point -- NOT tuned for this
@@ -36,7 +37,9 @@
 # (11 layers / n_embd=1024) is larger than 07_pretrain.sh's, but bf16
 # rather than fp32 halves the lm_head logits buffer that OOM'd there. The
 # A100-80GB nodes (-C "fat", see `sinfo -o "%P %G"`) have room for more if
-# throughput ever needs it.
+# throughput ever needs it. --block-size is now an upper bound rather than
+# the size of every batch: rows are padded to the longest conversation in
+# their batch, so a batch of short conversations is a smaller tensor.
 #
 # Do a short dry run first -- into a *separate* --out-dir, since resuming
 # is on by default and a real run pointed at a directory with a dry run's
@@ -55,7 +58,9 @@
 # 494,086,666 train tokens, so one epoch is ~3.2h and the default
 # SFT_EPOCHS=2 is ~6.4h; 8h leaves ~25% slack. Re-derive this whenever the
 # corpus, batch size, or GPU changes: max_iters prints at job start, and
-# tokens_per_sec is logged to W&B at every eval.
+# tokens_per_sec is logged to W&B at every eval (as are padded_tokens_seen
+# and batch_fill_rate -- real tokens over tokens the GPU actually ran,
+# which length-grouped batching should keep near 1.0).
 #
 # Note the *first* dry run of this script measured only 4,599 tokens/sec --
 # at 20 iterations, torch.compile warmup plus an eval every 5 iterations
@@ -95,11 +100,11 @@ BATCH_SIZE=16
 SFT_EPOCHS=${SFT_EPOCHS:-2}
 
 # Derive max_iters from the packed corpus size (see comment above).
-MAX_ITERS=$(python3 - "$DATA_DIR/meta.json" "$BLOCK_SIZE" "$BATCH_SIZE" "$SFT_EPOCHS" <<'PY'
+MAX_ITERS=$(python3 - "$DATA_DIR/meta.json" "$BATCH_SIZE" "$SFT_EPOCHS" <<'PY'
 import json, sys
 meta = json.load(open(sys.argv[1]))
-block, batch, epochs = int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
-print(max(1, round(meta["train_tokens"] * epochs / (block * batch))))
+batch, epochs = int(sys.argv[2]), float(sys.argv[3])
+print(max(1, round(meta["train_examples"] * epochs / batch)))
 PY
 )
 EVAL_INTERVAL=$(( MAX_ITERS / 50 > 0 ? MAX_ITERS / 50 : 1 ))   # ~50 eval points per run
