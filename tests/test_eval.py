@@ -20,7 +20,7 @@ from src.eval.tasks.alba import ALBA
 from src.eval.tasks.base import Task
 from src.eval.tasks.calame_pt import CalamePT
 from src.eval.tasks.chatrag_hi import ChatRAGHi
-from src.eval.tasks.gsm8k import GSM8KHindi, GSM8KPortuguese, _last_number, _numbers_equal
+from src.eval.tasks.gsm8k import GSM8KHindi, GSM8KPortuguese, GSM8KSpanish, _last_number, _numbers_equal
 from src.eval.tasks.math_bench import MATHEnglish, _last_boxed, _normalize
 from src.eval.tasks.mmlu import MMLUHindi, MMLUPortuguese, MMLUSpanish
 from src.eval.tasks.pt_culture import PTCulture
@@ -363,6 +363,15 @@ def test_gsm8k_pt_doc_to_text():
     task = GSM8KPortuguese()
     doc = Doc(0, row)
     assert task.doc_to_text(doc) == "Pergunta: Uma toga requer 2 rolos de fibra azul.\nResposta:"
+
+
+def test_gsm8k_es_doc_to_text_and_scoring():
+    row = {"question": "Un huerto tiene 12 manzanos.", "answer": "...\n#### 7"}
+    task = GSM8KSpanish()
+    doc = Doc(0, row)
+    assert task.doc_to_text(doc) == "Pregunta: Un huerto tiene 12 manzanos.\nRespuesta:"
+    assert task.process_result(doc, "paso a paso... #### 7")["exact_match"] == 1.0
+    assert task.process_result(doc, "paso a paso... #### 8")["exact_match"] == 0.0
 
 
 def test_math_last_boxed_handles_nesting():

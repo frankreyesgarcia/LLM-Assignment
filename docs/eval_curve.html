@@ -214,13 +214,19 @@
     rows) uncapped. GSM8K-hi/pt use
     <a href="https://huggingface.co/datasets/nvidia/GSM8K-Hi" target="_blank" rel="noopener">nvidia/GSM8K-Hi</a>
     and
-    <a href="https://huggingface.co/datasets/Polygl0t/gsm8k-pt" target="_blank" rel="noopener">Polygl0t/gsm8k-pt</a>.
+    <a href="https://huggingface.co/datasets/Polygl0t/gsm8k-pt" target="_blank" rel="noopener">Polygl0t/gsm8k-pt</a>;
+    GSM8K-es has no comparably-maintained translation on HF Hub, so it was
+    produced in-house with a locally-served GLM-4.7-Flash
+    (<code>scripts/translate_gsm8k_es.py</code>) and published as
+    <a href="https://huggingface.co/datasets/frank-rg/gsm8k-es" target="_blank" rel="noopener">frank-rg/gsm8k-es</a>
+    — row-aligned with the English source, with the final <code>#### &lt;number&gt;</code>
+    re-verified to match the English answer exactly on all 1,319 rows.
     MATH has no target-language translation available, so it ran in English
     only on
     <a href="https://huggingface.co/datasets/nlile/hendrycks-MATH-benchmark" target="_blank" rel="noopener">nlile/hendrycks-MATH-benchmark</a>.
     Zero-shot, generative (greedy decode, last-number / last-<code>\boxed{}</code>
     grading). All three MMLU translations sit near the 25% random-guess floor
-    (4-choice); all three math benchmarks are effectively 0% — this pretrain-only
+    (4-choice); all math/GSM8K benchmarks are effectively 0% — this pretrain-only
     checkpoint has no reliable multi-step reasoning, consistent with the MGSM-es
     result above.
   </p>
@@ -246,6 +252,7 @@ const NEW_BENCH_ROWS = [
   {"label": "MMLU-hi", "metric": "accuracy", "n": 14042, "value": 0.23835635949294973},
   {"label": "GSM8K-hi", "metric": "exact_match", "n": 1319, "value": 0.00530705079605762},
   {"label": "GSM8K-pt", "metric": "exact_match", "n": 1295, "value": 0.009266409266409266},
+  {"label": "GSM8K-es", "metric": "exact_match", "n": 1319, "value": 0.01288855193328279},
   {"label": "MATH-en", "metric": "exact_match", "n": 500, "value": 0.0}
 ];
 

@@ -1,19 +1,23 @@
 """GSM8K (Task 4 extension): grade-school math word problems, chain-of-
-thought generation, translated to Hindi and Portuguese.
+thought generation, translated to Hindi, Portuguese, and Spanish.
 
-Uses each language's dedicated professional/community translation rather
-than a single multilingual repo, since (unlike MMLU's MMMLU) there isn't
-one aligned multilingual GSM8K release:
+Uses each language's dedicated translation rather than a single
+multilingual repo, since (unlike MMLU's MMMLU) there isn't one aligned
+multilingual GSM8K release:
 - Hindi:      nvidia/GSM8K-Hi (row-aligned translation of the 1,319-row
   openai/gsm8k "main/test" split)
 - Portuguese: Polygl0t/gsm8k-pt (1,295 rows -- not row-aligned with the
   English test split, but same task/format)
-
-No Spanish entry: unlike Hindi/Portuguese, no comparably-maintained
-Spanish GSM8K translation exists (only small, unofficial community
-copies) -- spanish_bench's mgsm_direct_es (src/eval/tasks/spanish_bench.py)
-already covers Spanish math word problems via lm-evaluation-harness, so
-this doesn't leave Spanish without math coverage.
+- Spanish:    frank-rg/gsm8k-es -- no comparably-maintained Spanish GSM8K
+  translation existed on HF Hub at the time (checked; only small
+  unofficial community copies), so this repo's translation was produced
+  in-house (scripts/translate_gsm8k_es.py + scripts/slurm/14_translate_gsm8k_es.sh),
+  row-aligned with openai/gsm8k "main/test" using a locally-served
+  GLM-4.7-Flash. The final "#### <number>" answer is re-appended verbatim
+  from the English source after translation regardless of what the
+  translation model produced there, since that marker is the
+  machine-checkable grading target, not prose -- a translated/hallucinated
+  number would silently corrupt every eval run against it.
 
 Scored the standard GSM8K way: both the reference and the model's
 generation encode the final answer as the last number in the text (the
@@ -91,3 +95,14 @@ class GSM8KPortuguese(_GSM8KTask):
 
     def doc_to_text(self, doc: Doc) -> str:
         return f"Pergunta: {doc.raw['question']}\nResposta:"
+
+
+@register("gsm8k_es")
+class GSM8KSpanish(_GSM8KTask):
+    language = "es"
+    description = 'Resuelve el problema matemático paso a paso y da la respuesta final en el formato "#### <respuesta>".'
+    stop_sequences = ["\nPregunta:", "\n\n"]
+    DATASET = "frank-rg/gsm8k-es"
+
+    def doc_to_text(self, doc: Doc) -> str:
+        return f"Pregunta: {doc.raw['question']}\nRespuesta:"
