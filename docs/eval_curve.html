@@ -314,6 +314,79 @@
     PT-Culture, ChatRAG-Hi and CALAME-PT generate text.
   </div>
 
+
+  <h2 class="section-title" id="sft-newbench">Translated MMLU / GSM8K, base vs SFT</h2>
+  <p class="subtitle">
+    The five benchmarks from the section above, re-run on the SFT checkpoint and on
+    the base checkpoint it started from (<code>ckpt.pt</code>, iteration 240,204 —
+    <i>not</i> the iteration 259,653 <code>ckpt_final.pt</code> used further up), so
+    both are measured identically. n=500 per task, zero-shot.
+    <b>Every cell is at the floor.</b> All twelve MMLU values fall between 0.204 and
+    0.252, a band of about ±1.2 standard errors around the 0.25 four-way chance line
+    (SE ≈ 0.019 at n=500); GSM8K is 0–8 correct out of 500 throughout. Nothing in this
+    table is a result — reading <code>mmlu_pt</code> 0.204 → 0.252 as SFT "improving"
+    would be reporting a coin landing heads a few more times.
+  </p>
+  <div class="diff-table-wrap">
+    <table>
+      <thead><tr>
+        <th>Benchmark</th><th>Metric</th>
+        <th class="num">base · raw</th><th class="num">SFT · raw</th>
+        <th class="num">base · chat</th><th class="num">SFT · chat</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>MMLU-pt</td><td class="muted">accuracy</td><td class="num">0.2120</td><td class="num">0.2440</td><td class="num">0.2040</td><td class="num">0.2520</td></tr>
+        <tr><td>MMLU-es</td><td class="muted">accuracy</td><td class="num">0.2480</td><td class="num">0.2380</td><td class="num">0.2400</td><td class="num">0.2260</td></tr>
+        <tr><td>MMLU-hi</td><td class="muted">accuracy</td><td class="num">0.2060</td><td class="num">0.2140</td><td class="num">0.2160</td><td class="num">0.2040</td></tr>
+        <tr><td>GSM8K-pt</td><td class="muted">exact_match</td><td class="num">0.0040</td><td class="num">0.0160</td><td class="num">0.0120</td><td class="num">0.0040</td></tr>
+        <tr><td>GSM8K-hi</td><td class="muted">exact_match</td><td class="num">0.0120</td><td class="num">0.0080</td><td class="num">0.0000</td><td class="num">0.0120</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="axis-caption">The scores are a floor, so they cannot separate <b>&ldquo;cannot do the arithmetic&rdquo;</b> from <b>&ldquo;never produces an answer to grade&rdquo;</b>. The saved generations can:</p>
+  <div class="diff-table-wrap">
+    <table>
+      <thead><tr>
+        <th>Run</th><th>Benchmark</th>
+        <th class="num">generations containing a number</th>
+        <th class="num">mean length (chars)</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>base · raw</td><td class="muted">GSM8K-pt</td><td class="num">35.8%</td><td class="num">472</td></tr>
+        <tr><td>SFT · raw</td><td class="muted">GSM8K-pt</td><td class="num up">77.0%</td><td class="num">155</td></tr>
+        <tr><td>base · chat</td><td class="muted">GSM8K-pt</td><td class="num">43.6%</td><td class="num">656</td></tr>
+        <tr><td>SFT · chat</td><td class="muted">GSM8K-pt</td><td class="num">40.0%</td><td class="num">145</td></tr>
+        <tr><td>base · raw</td><td class="muted">GSM8K-hi</td><td class="num">46.6%</td><td class="num">360</td></tr>
+        <tr><td>SFT · raw</td><td class="muted">GSM8K-hi</td><td class="num">44.6%</td><td class="num">293</td></tr>
+        <tr><td>base · chat</td><td class="muted">GSM8K-hi</td><td class="num">0.8%</td><td class="num">9</td></tr>
+        <tr><td>SFT · chat</td><td class="muted">GSM8K-hi</td><td class="num up">37.8%</td><td class="num">147</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="meta">
+    <b>What actually changed.</b>
+    <b>(1)</b> <b>SFT rescues Hindi generation under the chat template.</b> The base
+    checkpoint given a Hindi chat-formatted prompt emits <b>9 characters</b> on average
+    and a number in 0.8% of cases — it is effectively mute. The SFT checkpoint produces
+    147 characters with a number 37.8% of the time. Its 0.0120 score is still noise, but
+    the model moved from <i>producing nothing</i> to <i>answering incorrectly</i>, which
+    is a real behavioural change and the same pattern seen everywhere else in this
+    section.
+    <b>(2)</b> <b>SFT shortens output roughly threefold</b> (472&rarr;155 raw,
+    656&rarr;145 chat) — the stopping behaviour again, now measured on a third task
+    family.
+    <b>(3)</b> <b>No checkpoint ever emits the <code>####</code> marker</b> the task
+    instruction asks for (0.0–0.2% across all runs). Grading survives because it matches
+    the last number in the generation, but this is a concrete instruction-following
+    failure, and a caveat against comparing these numbers to published GSM8K results
+    where models do follow that convention.
+    <b>One caution:</b> the 77.0% on SFT&nbsp;·&nbsp;raw GSM8K-pt is not a general SFT
+    effect — the same model in chat mode gives 40.0%. The durable, mode-independent
+    effects are the length collapse and the Hindi rescue.
+  </div>
+
   <h2 class="section-title">What it looks like</h2>
   <p class="subtitle">
     Same prompt, same seed, same decoding — base checkpoint vs SFT checkpoint. The
