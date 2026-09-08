@@ -367,6 +367,109 @@ Adding a benchmark means writing one `tasks/*.py` file with a
 nothing at all -- any lm-eval task name just works) -- the CLI, runner,
 and report format never change.
 
+## Task 5 — SFT
+
+Fine-tunes a pretrained checkpoint (Task 3) on instruction data. The
+shared abstraction every dataset converts into is a plain chat message
+list, `[{"role": ..., "content": ...}]` -- exactly what `src/tokenizer/
+train.py::CHAT_TEMPLATE` already renders, so no new prompt format is
+invented. Dataset adapters live in `src/sft/sources/*.py`, each a
+`@register("name")` `SFTSource` subclass (same registry pattern as
+`src/eval/tasks/`) -- adding a dataset means writing one file + one import
+line in `sources/__init__.py`, nothing else changes:
+
+- `euroblocks_pt`/`euroblocks_es` (utter-project/EuroBlocks-SFT-2512,
+  filtered by its `language` column)
+- `smoltalk2pt` (duarteocarmo/smoltalk2PT, all 4 configs)
+- `indic_instruct_hi` (ai4bharat/indic-instruct-data-v0.1, `hh-rlhf` config's
+  `hi` split -- already plain SFT messages despite the "hh-rlhf" name, not
+  chosen/rejected preference pairs)
+- `aya_hi` (CohereLabs/aya_collection, `templated_hindi_headline` +
+  `templated_hindi_news` -- the one adapter that isn't already
+  messages-shaped; it converts `inputs`/`targets` prompt/completion pairs)
+
+**Open gap:** `aya_hi` only covers two narrow templated generation tasks
+(headline->article, article->summary), not open-ended instruction
+following -- a broader general-purpose Hindi SFT source is still needed.
+
+```bash
+# Tokenize + pack every registered source into data/sft/ (train.bin/
+# train_labels.bin/val.bin/val_labels.bin/meta.json)
+uv run scripts/prepare_sft_data.py --tokenizer-dir artifacts/tokenizer
+
+# Fine-tune a Task-3 checkpoint on it
+uv run scripts/train_sft.py --init-from runs/train/ckpt_final.pt \
+    --data-dir data/sft --out-dir runs/sft
+
+# tests (offline, no network)
+uv run pytest tests/test_sft.py -v
+```
+
+On Berzelius, run both stages as batch jobs -- neither belongs on a login
+node (the data prep scans EuroBlocks' full 1.09M-row stream; training
+needs a GPU the login node doesn't have):
+
+```bash
+# smoke-test the data path first (--limit 200/source, writes data/sft_smoke)
+sbatch --export=ALL,SFT_LIMIT=200 scripts/slurm/13_prepare_sft_data.sh
+
+# real run: prepare, then fine-tune once that succeeds
+JOB1=$(sbatch --parsable scripts/slurm/13_prepare_sft_data.sh)
+sbatch --dependency=afterok:$JOB1 scripts/slurm/14_train_sft.sh
+```
+
+`14_train_sft.sh` derives `--max-iters` from `data/sft/meta.json`'s token
+count rather than hardcoding it (`SFT_EPOCHS`, default 2 -- SFT is
+epoch-shaped over a fixed corpus, unlike pretraining's FLOPs budget over
+an effectively unbounded stream), and logs to W&B unconditionally.
+`SFT_DRYRUN=1` runs 20 iterations into a separate `runs/sft_dryrun`
+out-dir -- separate because resume-on-resubmit is on by default, so a real
+run pointed at a directory holding a dry run's `ckpt_last.pt` would
+silently continue from it. Size `#SBATCH --time` from the `tokens_per_sec`
+that dry run reports before submitting the real job.
+
+**Context window and over-length conversations.** The base checkpoint's
+`block_size` is 1024 and `src/model/gpt.py` uses *learned* positional
+embeddings, so 1024 is a hard ceiling -- `train_sft.py` refuses a larger
+`--block-size`. Two things follow, both of which the pipeline handles
+explicitly rather than silently:
+
+- `--max-example-tokens 1024` drops conversations that can't fit whole,
+  counting them per source in `meta.json`. Without it they aren't
+  truncated or dropped -- they're split across windows, so every fragment
+  after the first supervises assistant tokens whose prompt is out of
+  view. On the unfiltered corpus that was 48.7% of conversations holding
+  81.6% of all tokens.
+- Training windows start at conversation boundaries (`{split}_starts.bin`),
+  not at uniform offsets into the packed stream. Dropping over-length
+  conversations is not sufficient on its own: measured on the filtered
+  corpus, uniform offsets still began mid-conversation in 99.8% of windows,
+  with 33.8% of the average window being orphaned tokens.
+
+`meta.json` records per-source and per-language example/token/supervised-token
+counts (at sub-source granularity, e.g. `smoltalk2pt/magpie_ultra`), the
+conversation-length percentiles, and what was dropped -- so the mix that
+actually reached training is recoverable from the output rather than needing
+a separate audit.
+
+`scripts/prepare_sft_data.py` renders each conversation turn-by-turn with
+the same wrapping `CHAT_TEMPLATE` uses, masking every token outside an
+assistant turn to `-1` (`labels.bin`, a signed dtype unlike the token
+stream's `uint16`) so `src/model/gpt.py`'s existing
+`F.cross_entropy(..., ignore_index=-1)` only computes loss on what the
+model should learn to produce. Conversations are separated by the
+tokenizer's EOS token, the same document-boundary sentinel pretraining
+uses -- so `src/model/train.py`'s existing per-document attention masking
+(`document_ids`) works unmodified to keep multiple packed conversations
+from attending across each other, while still letting each conversation's
+assistant turn attend over its own earlier user turns. `src/model/
+train_sft.py::train_sft_model` is a small sibling of `train_model` (not a
+branch inside it) that reuses those helpers plus the LR schedule/optimizer/
+AMP/checkpointing/W&B machinery, but always initializes from a pretrained
+checkpoint (`--init-from`, required) rather than random init, and reads
+targets from the precomputed `labels.bin` stream instead of deriving them
+from the token stream itself.
+
 ## Known findings (2026-07-17)
 
 - Measured hi-fineweb2/hi-sangraha overlap by hand (custom exact + MinHash
