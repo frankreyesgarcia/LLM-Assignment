@@ -116,7 +116,8 @@ Reading these honestly:
   language modelling — no catastrophic forgetting.
 - **The multiple-choice tasks are flat by design.** They score by ranking
   fixed continuations by log-probability; SFT teaches format and stopping,
-  not knowledge. Six of the eight tasks above are of this kind.
+  not knowledge. Five of the eight tasks above are of this kind (only
+  PT-Culture, ChatRAG-Hi and CALAME-PT generate text).
 - **EsCoLA is excluded**: all four runs are degenerate (MCC ≈ 0 against
   accuracies swinging 0.32–0.69 on a ~2/3-imbalanced label, i.e. a
   near-constant predicted class).

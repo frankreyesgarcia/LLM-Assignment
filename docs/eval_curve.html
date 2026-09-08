@@ -239,8 +239,9 @@
     MATH has no target-language translation available, so it ran in English
     only on
     <a href="https://huggingface.co/datasets/nlile/hendrycks-MATH-benchmark" target="_blank" rel="noopener">nlile/hendrycks-MATH-benchmark</a>.
-    Zero-shot, generative (greedy decode, last-number / last-<code>\boxed{}</code>
-    grading). All three MMLU translations sit near the 25% random-guess floor
+    Zero-shot. MMLU is scored by log-probability ranking over the four answer
+    texts; GSM8K and MATH by greedy decoding, graded on the last number /
+    last <code>\boxed{}</code>. All three MMLU translations sit near the 25% random-guess floor
     (4-choice); all three math benchmarks are effectively 0% — this pretrain-only
     checkpoint has no reliable multi-step reasoning, consistent with the MGSM-es
     result above.
@@ -322,8 +323,10 @@
     <i>not</i> the iteration 259,653 <code>ckpt_final.pt</code> used further up), so
     both are measured identically. n=500 per task, zero-shot.
     <b>Every cell is at the floor.</b> All twelve MMLU values fall between 0.204 and
-    0.252, a band of about ±1.2 standard errors around the 0.25 four-way chance line
-    (SE ≈ 0.019 at n=500); GSM8K is 0–8 correct out of 500 throughout. Nothing in this
+    0.252, a band 2.5 standard errors wide (SE ≈ 0.019 at n=500) whose midpoint,
+    0.228, sits just over one standard error <i>below</i> the 0.25 four-way chance
+    line — the four lowest cells land about two standard errors below chance, which
+    unnormalised log-probability ranking can do; GSM8K is 0–8 correct out of 500 throughout. Nothing in this
     table is a result — reading <code>mmlu_pt</code> 0.204 → 0.252 as SFT "improving"
     would be reporting a coin landing heads a few more times.
   </p>
