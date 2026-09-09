@@ -17,14 +17,33 @@
 # even for one checkpoint), and an uncapped SFT number would not be
 # comparable to it.
 #
-# COMPARABILITY CAVEAT, worth stating because it is easy to miss: the
-# published base numbers are for ckpt_final.pt (iteration 259,653), while
-# SFT was initialised from ckpt.pt (iteration 240,204). Those are
-# different checkpoints ~19k steps apart, so an SFT-minus-base difference
-# here mixes the fine-tuning with that gap. The n=500 runs measured their
-# own base at iteration 240,204 and are the cleaner comparison for
-# direction; these full numbers are the precise ones. Neither is wrong,
-# they answer different questions.
+# WHICH BASE TO COMPARE AGAINST: ckpt.pt (iteration 240,204), the
+# checkpoint SFT was actually initialised from -- not ckpt_final.pt
+# (iteration 259,653), which is what 11_eval_full_validation.sh and
+# 13_eval_new_benchmarks_final.sh published. The two are ~19k steps apart
+# and it is not a small difference: EsCoLA reads 0.3200 at 240,204 against
+# 0.6971 at 259,653 (the degenerate-class flip), and Portugal Basic QA
+# 0.5600 against 0.6200. Differencing SFT against the wrong one invents a
+# delta that is really just those 19k steps.
+#
+# Full-dataset base numbers at 240,204 already exist for every task in
+# the `main` and `ptculture` groups: the 80-checkpoint full sweep
+# (12_eval_checkpoint_sweep_full.sh) evaluated all of them at that exact
+# iteration, and the values are embedded in docs/eval_curve.html's PANELS
+# seriesFull. Nothing needs re-running for those.
+#
+# The gap the sweep does not cover is the `newbench` group (MMLU x3,
+# GSM8K x2, MATH), which only ever ran against ckpt_final.pt. Run the
+# base for that group at ckpt.pt with:
+#   sbatch -t 08:00:00 --export=ALL,EVAL_MODE=pretrain,EVAL_GROUP=newbench,\
+#       EVAL_CKPT=/proj/assert-berzelius/users/x_amash/llm-und/runs/pretrain_2.2e18_bf16_qknorm/ckpt.pt,\
+#       EVAL_OUT=$PROJECT_STORAGE/runs/eval/base_ckptpt_full \
+#       scripts/slurm/17_eval_sft_full.sh
+#
+# The sweep is pretrain-mode only, so full-dataset base numbers in chat
+# mode do not exist for any task; the report keeps using the n=500
+# base-chat figures from 15/16_eval_*.sh for that column and labels the
+# mixed sample sizes.
 #
 # Split into three groups x two prompt modes = 6 independent jobs rather
 # than one long one, so a walltime kill loses one group instead of
@@ -69,7 +88,9 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_commo
 
 MODE=${EVAL_MODE:?set EVAL_MODE to pretrain or posttrain}
 GROUP=${EVAL_GROUP:?set EVAL_GROUP to main, ptculture or newbench}
-SFT_CKPT=${SFT_CKPT:-$PROJECT_STORAGE/runs/sft/ckpt.pt}
+# EVAL_CKPT lets this same script evaluate the base checkpoint for the
+# one group the sweep does not cover -- see the header.
+SFT_CKPT=${EVAL_CKPT:-${SFT_CKPT:-$PROJECT_STORAGE/runs/sft/ckpt.pt}}
 TOK=/proj/assert-berzelius/users/x_andaf/llm-und/artifacts/tokenizer
 OUT=${EVAL_OUT:-$PROJECT_STORAGE/runs/eval/sft_full}
 
