@@ -37,7 +37,7 @@
 # base for that group at ckpt.pt with:
 #   sbatch -t 08:00:00 --export=ALL,EVAL_MODE=pretrain,EVAL_GROUP=newbench,\
 #       EVAL_CKPT=/proj/assert-berzelius/users/x_amash/llm-und/runs/pretrain_2.2e18_bf16_qknorm/ckpt.pt,\
-#       EVAL_OUT=$PROJECT_STORAGE/runs/eval/base_ckptpt_full \
+#       EVAL_OUT=$PROJECT_STORAGE/runs/eval/base_ckptpt_full \   # took 1:50:58
 #       scripts/slurm/17_eval_sft_full.sh
 #
 # The sweep is pretrain-mode only, so full-dataset base numbers in chat
@@ -49,16 +49,23 @@
 # than one long one, so a walltime kill loses one group instead of
 # everything, and so the short groups are not stuck behind MMLU:
 #
-#   main       13 benchmarks, ~16,600 examples   (-t 06:00:00)
-#   ptculture  pt_culture at the base's 2,000    (-t 03:00:00)
-#   newbench   MMLU x3 (42,126) + GSM8K + MATH   (-t 08:00:00)
+#   main       13 benchmarks, ~16,600 examples   (-t 02:00:00)
+#   ptculture  pt_culture at the base's 2,000    (-t 01:00:00)
+#   newbench   MMLU x3 (42,126) + GSM8K + MATH   (-t 03:00:00)
 #
-# Walltimes are extrapolated from this repo's own --limit 500 runs (jobs
-# 17366514 and 17378908: ~23 min per checkpoint x mode for 9 tasks at
-# n=500, ~16 min for 5 tasks), scaled by example count and rounded up
-# generously. They are not measured at full size -- the base scripts'
-# own 6h requests are the only other datapoint, and those were also
-# estimates. Tighten them once this has run once.
+# Walltimes are measured, not extrapolated -- from the first full run
+# (jobs 17490932-44), with roughly 60% headroom:
+#
+#   main       1:12:19 raw / 0:34:49 chat
+#   ptculture  0:11:33 raw / 0:16:07 chat
+#   newbench   1:11:13 raw / 0:50:22 chat, and 1:50:58 for the base
+#              checkpoint, which is slower because it does not stop
+#              generating the way the SFT checkpoint learned to
+#
+# The first submission asked for 6h/3h/8h, i.e. 3-8x what the jobs
+# actually needed. That is not free: an oversized request is harder to
+# backfill, and this project has already lost hours to exactly that
+# (see the --cpus-per-task note in 13_prepare_sft_data.sh).
 #
 # Both modes are run: posttrain is how an SFT checkpoint is meant to be
 # prompted, pretrain matches the protocol every published base number
@@ -66,9 +73,9 @@
 #
 # Usage -- submit all six:
 #   for m in pretrain posttrain; do
-#     sbatch -t 06:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=main      scripts/slurm/17_eval_sft_full.sh
-#     sbatch -t 03:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=ptculture scripts/slurm/17_eval_sft_full.sh
-#     sbatch -t 08:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=newbench  scripts/slurm/17_eval_sft_full.sh
+#     sbatch -t 02:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=main      scripts/slurm/17_eval_sft_full.sh
+#     sbatch -t 01:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=ptculture scripts/slurm/17_eval_sft_full.sh
+#     sbatch -t 03:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=newbench  scripts/slurm/17_eval_sft_full.sh
 #   done
 #
 #SBATCH --job-name=llm-und-eval-sft-full
@@ -79,7 +86,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=08:00:00              # overridden per group by the -t above
+#SBATCH --time=03:00:00              # overridden per group by the -t above
 #SBATCH --output=runs/%j-17_eval_sft_full.out
 #SBATCH --error=runs/%j-17_eval_sft_full.err
 
