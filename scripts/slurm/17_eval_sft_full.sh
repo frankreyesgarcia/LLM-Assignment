@@ -1,0 +1,124 @@
+#!/bin/bash
+# Task 5 -- full-dataset evaluation of the SFT checkpoint.
+#
+# scripts/slurm/15_eval_sft.sh and 16_eval_new_benchmarks.sh both ran at
+# --limit 500, which was enough to compare base vs SFT but leaves every
+# number with a sampling error the published base figures do not have
+# (+/-2 points on a 4-way multiple-choice task at n=500). This re-runs
+# the SFT checkpoint uncapped, so its numbers sit on the same footing as
+# the base checkpoint's in scripts/slurm/11_eval_full_validation.sh and
+# 13_eval_new_benchmarks_final.sh. The base is not re-run -- it already
+# has full-dataset numbers.
+#
+# Task list and caps are copied from those two base scripts on purpose,
+# so every base figure gets an SFT counterpart measured the same way.
+# That includes pt_culture staying at --limit 2000: the base was capped
+# there (2,000 of 105,380 rows -- true-full was measured as impractical
+# even for one checkpoint), and an uncapped SFT number would not be
+# comparable to it.
+#
+# COMPARABILITY CAVEAT, worth stating because it is easy to miss: the
+# published base numbers are for ckpt_final.pt (iteration 259,653), while
+# SFT was initialised from ckpt.pt (iteration 240,204). Those are
+# different checkpoints ~19k steps apart, so an SFT-minus-base difference
+# here mixes the fine-tuning with that gap. The n=500 runs measured their
+# own base at iteration 240,204 and are the cleaner comparison for
+# direction; these full numbers are the precise ones. Neither is wrong,
+# they answer different questions.
+#
+# Split into three groups x two prompt modes = 6 independent jobs rather
+# than one long one, so a walltime kill loses one group instead of
+# everything, and so the short groups are not stuck behind MMLU:
+#
+#   main       13 benchmarks, ~16,600 examples   (-t 06:00:00)
+#   ptculture  pt_culture at the base's 2,000    (-t 03:00:00)
+#   newbench   MMLU x3 (42,126) + GSM8K + MATH   (-t 08:00:00)
+#
+# Walltimes are extrapolated from this repo's own --limit 500 runs (jobs
+# 17366514 and 17378908: ~23 min per checkpoint x mode for 9 tasks at
+# n=500, ~16 min for 5 tasks), scaled by example count and rounded up
+# generously. They are not measured at full size -- the base scripts'
+# own 6h requests are the only other datapoint, and those were also
+# estimates. Tighten them once this has run once.
+#
+# Both modes are run: posttrain is how an SFT checkpoint is meant to be
+# prompted, pretrain matches the protocol every published base number
+# used and doubles as the catastrophic-forgetting check.
+#
+# Usage -- submit all six:
+#   for m in pretrain posttrain; do
+#     sbatch -t 06:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=main      scripts/slurm/17_eval_sft_full.sh
+#     sbatch -t 03:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=ptculture scripts/slurm/17_eval_sft_full.sh
+#     sbatch -t 08:00:00 --export=ALL,EVAL_MODE=$m,EVAL_GROUP=newbench  scripts/slurm/17_eval_sft_full.sh
+#   done
+#
+#SBATCH --job-name=llm-und-eval-sft-full
+#SBATCH --account=CHANGE_ME          # -A <PROJECT_ACCOUNT>, see _common.sh
+#SBATCH --partition=berzelius
+#SBATCH --gpus=1
+#SBATCH -C "thin"
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00              # overridden per group by the -t above
+#SBATCH --output=runs/%j-17_eval_sft_full.out
+#SBATCH --error=runs/%j-17_eval_sft_full.err
+
+set -euo pipefail
+source "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/scripts/slurm/_common.sh"
+
+MODE=${EVAL_MODE:?set EVAL_MODE to pretrain or posttrain}
+GROUP=${EVAL_GROUP:?set EVAL_GROUP to main, ptculture or newbench}
+SFT_CKPT=${SFT_CKPT:-$PROJECT_STORAGE/runs/sft/ckpt.pt}
+TOK=/proj/assert-berzelius/users/x_andaf/llm-und/artifacts/tokenizer
+OUT=${EVAL_OUT:-$PROJECT_STORAGE/runs/eval/sft_full}
+
+if [ ! -f "$SFT_CKPT" ]; then
+    echo "MISSING checkpoint: $SFT_CKPT" >&2
+    exit 1
+fi
+
+# No --limit anywhere except pt_culture, which keeps the base's cap.
+LIMIT_ARGS=()
+case "$GROUP" in
+    main)
+        TASKS=calame_pt,portugal_basic_qa,alba,chatrag_hi,belebele_spa_Latn,copa_es,escola,openbookqa_es,xstorycloze_es,mgsm_direct_es_spanish_bench,eqbench_es,cocoteros_es,phrases_es
+        ;;
+    ptculture)
+        TASKS=pt_culture
+        LIMIT_ARGS=(--limit 2000)   # matches the base run; see header
+        ;;
+    newbench)
+        TASKS=mmlu_pt,mmlu_es,mmlu_hi,gsm8k_hi,gsm8k_pt,math_en
+        ;;
+    *)
+        echo "unknown EVAL_GROUP: $GROUP (expected main, ptculture or newbench)" >&2
+        exit 1
+        ;;
+esac
+
+# ALBA needs ANTHROPIC_API_KEY to be scored; without it run_eval.py still
+# generates and saves the outputs, just with no judge_score. Export the
+# key before submitting to get a scored ALBA in the same run.
+JUDGE_ARGS=()
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    JUDGE_ARGS=(--judge anthropic)
+    echo "ALBA: judge enabled"
+else
+    echo "ALBA: no ANTHROPIC_API_KEY -- generations saved unscored"
+fi
+
+# --log-samples throughout: on the --limit 500 runs the per-example
+# generations were what distinguished "answers wrongly" from "emits
+# nothing at all" (the base checkpoint turned out to be mute on Hindi
+# chat prompts), and the aggregate score cannot show that.
+echo "=== SFT full eval: group=$GROUP mode=$MODE start $(date -Iseconds) ==="
+echo "    ckpt=$SFT_CKPT"
+echo "    tasks=$TASKS"
+uv run scripts/run_eval.py \
+    --ckpt "$SFT_CKPT" --tokenizer-dir "$TOK" --mode "$MODE" \
+    --tasks "$TASKS" --num-fewshot 0 --device auto --log-samples \
+    "${LIMIT_ARGS[@]}" "${JUDGE_ARGS[@]}" \
+    --out-dir "$OUT/${GROUP}_${MODE}"
+echo "=== SFT full eval: group=$GROUP mode=$MODE done $(date -Iseconds) ==="
+echo "Results under: $OUT/${GROUP}_${MODE}"
