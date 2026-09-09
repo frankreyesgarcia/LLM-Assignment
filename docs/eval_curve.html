@@ -258,10 +258,10 @@
     at training iteration 240,204 — the same checkpoint that is CALAME-PT's peak on
     the curve above. 158,834 conversations / 90.9M tokens, 2 epochs (19,854 steps),
     lr 5e-5 &rarr; 5e-6, bf16 on one A100, 3h24m.
-    Everything below is a <b>separate n=500 eval run with its own base-checkpoint
-    measurement at the same n</b> — not the same scale as the full-dataset curve above.
-    Read the SFT-vs-base deltas within this section; do not difference them against a
-    number from the section above.
+    Every benchmark below is scored on its <b>full dataset</b> (pt_culture keeps the
+    2,000-row cap the base sweep used, for comparability), against the base checkpoint
+    measured at the same iteration — so these numbers sit on the same footing as the
+    curve above rather than on a 500-example sample.
   </p>
 
   <div class="sft-badges" id="sftBadges"></div>
@@ -284,110 +284,68 @@
     </div>
   </div>
 
-  <p class="axis-caption">Below: every benchmark, <b>base vs SFT</b>, in both prompt formats. <b>chat</b> = the chat template the SFT data was rendered with; <b>raw</b> = plain ICL text, the format the base checkpoint was pretrained on.</p>
-  <div class="grid" id="sftGrid"></div>
-
-  <div class="diff-table-wrap" style="margin-top:18px">
-    <table>
-      <thead><tr>
-        <th>Benchmark</th><th>Metric</th>
-        <th class="num">base · raw</th><th class="num">SFT · raw</th>
-        <th class="num">base · chat</th><th class="num">SFT · chat</th>
-        <th class="num">SFT&minus;base (chat)</th>
-      </tr></thead>
-      <tbody id="sftTableBody"></tbody>
-    </table>
-  </div>
-
-  <div class="meta">
-    <b>Three things this table cannot tell you.</b>
-    <b>(1)</b> <b>EsCoLA is degenerate in all four runs</b> — MCC is &minus;0.056 / 0.000 /
-    0.066 / 0.018 against accuracies swinging 0.32&ndash;0.69. Every checkpoint emits a
-    near-constant class and EsCoLA is ~2/3 one label, so that accuracy column is class
-    imbalance, not skill. Charted separately from the rest for that reason.
-    <b>(2)</b> <b>ALBA is unscored</b> — no <code>ANTHROPIC_API_KEY</code>, so generations
-    were produced and saved with no judge_score. It is the only open-ended
-    instruction-following benchmark here, i.e. the measurement most relevant to SFT, and
-    it is the one that is missing.
-    <b>(3)</b> <b>Six of the nine tasks are multiple choice</b>, scored by ranking fixed
-    continuations by log-probability. SFT teaches format and stopping, not knowledge, so
-    those staying flat is the expected result rather than a disappointing one. Only
-    PT-Culture, ChatRAG-Hi and CALAME-PT generate text.
-  </div>
-
-
-  <h2 class="section-title" id="sft-newbench">Translated MMLU / GSM8K, base vs SFT</h2>
-  <p class="subtitle">
-    The five benchmarks from the section above, re-run on the SFT checkpoint and on
-    the base checkpoint it started from (<code>ckpt.pt</code>, iteration 240,204 —
-    <i>not</i> the iteration 259,653 <code>ckpt_final.pt</code> used further up), so
-    both are measured identically. n=500 per task, zero-shot.
-    <b>Every cell is at the floor.</b> All twelve MMLU values fall between 0.204 and
-    0.252, a band 2.5 standard errors wide (SE ≈ 0.019 at n=500) whose midpoint,
-    0.228, sits just over one standard error <i>below</i> the 0.25 four-way chance
-    line — the four lowest cells land about two standard errors below chance, which
-    unnormalised log-probability ranking can do; GSM8K is 0–8 correct out of 500 throughout. Nothing in this
-    table is a result — reading <code>mmlu_pt</code> 0.204 → 0.252 as SFT "improving"
-    would be reporting a coin landing heads a few more times.
+  <p class="axis-caption">
+    <b>base &middot; raw</b> is the pretrained checkpoint at iteration 240,204, the one SFT
+    started from — taken from the 80-checkpoint full sweep above, not from the
+    <code>ckpt_final.pt</code> figures in the previous section (those are 19k steps later,
+    and on EsCoLA alone the two differ by 0.38). <b>SFT &middot; chat</b> appears only for
+    benchmarks whose prompt is genuinely a question or instruction; see the note below.
   </p>
   <div class="diff-table-wrap">
     <table>
       <thead><tr>
-        <th>Benchmark</th><th>Metric</th>
+        <th>Benchmark</th><th>Metric</th><th class="num">n</th>
         <th class="num">base · raw</th><th class="num">SFT · raw</th>
-        <th class="num">base · chat</th><th class="num">SFT · chat</th>
+        <th class="num">SFT · chat</th><th class="num">SFT−base (raw)</th>
       </tr></thead>
-      <tbody>
-        <tr><td>MMLU-pt</td><td class="muted">accuracy</td><td class="num">0.2120</td><td class="num">0.2440</td><td class="num">0.2040</td><td class="num">0.2520</td></tr>
-        <tr><td>MMLU-es</td><td class="muted">accuracy</td><td class="num">0.2480</td><td class="num">0.2380</td><td class="num">0.2400</td><td class="num">0.2260</td></tr>
-        <tr><td>MMLU-hi</td><td class="muted">accuracy</td><td class="num">0.2060</td><td class="num">0.2140</td><td class="num">0.2160</td><td class="num">0.2040</td></tr>
-        <tr><td>GSM8K-pt</td><td class="muted">exact_match</td><td class="num">0.0040</td><td class="num">0.0160</td><td class="num">0.0120</td><td class="num">0.0040</td></tr>
-        <tr><td>GSM8K-hi</td><td class="muted">exact_match</td><td class="num">0.0120</td><td class="num">0.0080</td><td class="num">0.0000</td><td class="num">0.0120</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <p class="axis-caption">The scores are a floor, so they cannot separate <b>&ldquo;cannot do the arithmetic&rdquo;</b> from <b>&ldquo;never produces an answer to grade&rdquo;</b>. The saved generations can:</p>
-  <div class="diff-table-wrap">
-    <table>
-      <thead><tr>
-        <th>Run</th><th>Benchmark</th>
-        <th class="num">generations containing a number</th>
-        <th class="num">mean length (chars)</th>
-      </tr></thead>
-      <tbody>
-        <tr><td>base · raw</td><td class="muted">GSM8K-pt</td><td class="num">35.8%</td><td class="num">472</td></tr>
-        <tr><td>SFT · raw</td><td class="muted">GSM8K-pt</td><td class="num up">77.0%</td><td class="num">155</td></tr>
-        <tr><td>base · chat</td><td class="muted">GSM8K-pt</td><td class="num">43.6%</td><td class="num">656</td></tr>
-        <tr><td>SFT · chat</td><td class="muted">GSM8K-pt</td><td class="num">40.0%</td><td class="num">145</td></tr>
-        <tr><td>base · raw</td><td class="muted">GSM8K-hi</td><td class="num">46.6%</td><td class="num">360</td></tr>
-        <tr><td>SFT · raw</td><td class="muted">GSM8K-hi</td><td class="num">44.6%</td><td class="num">293</td></tr>
-        <tr><td>base · chat</td><td class="muted">GSM8K-hi</td><td class="num">0.8%</td><td class="num">9</td></tr>
-        <tr><td>SFT · chat</td><td class="muted">GSM8K-hi</td><td class="num up">37.8%</td><td class="num">147</td></tr>
-      </tbody>
+      <tbody id="fullTableBody"></tbody>
     </table>
   </div>
 
   <div class="meta">
-    <b>What actually changed.</b>
-    <b>(1)</b> <b>SFT rescues Hindi generation under the chat template.</b> The base
-    checkpoint given a Hindi chat-formatted prompt emits <b>9 characters</b> on average
-    and a number in 0.8% of cases — it is effectively mute. The SFT checkpoint produces
-    147 characters with a number 37.8% of the time. Its 0.0120 score is still noise, but
-    the model moved from <i>producing nothing</i> to <i>answering incorrectly</i>, which
-    is a real behavioural change and the same pattern seen everywhere else in this
-    section.
-    <b>(2)</b> <b>SFT shortens output roughly threefold</b> (472&rarr;155 raw,
-    656&rarr;145 chat) — the stopping behaviour again, now measured on a third task
-    family.
-    <b>(3)</b> <b>No checkpoint ever emits the <code>####</code> marker</b> the task
-    instruction asks for (0.0–0.2% across all runs). Grading survives because it matches
-    the last number in the generation, but this is a concrete instruction-following
-    failure, and a caveat against comparing these numbers to published GSM8K results
-    where models do follow that convention.
-    <b>One caution:</b> the 77.0% on SFT&nbsp;·&nbsp;raw GSM8K-pt is not a general SFT
-    effect — the same model in chat mode gives 40.0%. The durable, mode-independent
-    effects are the length collapse and the Hindi rescue.
+    <b>Where SFT helped, and where it cost.</b> Differences are called real only where
+    they clear roughly two standard errors at the stated n; everything else is sampling
+    noise even at full dataset.
+    <b>Gained:</b> PT-Culture in chat mode (0.1884 &rarr; <b>0.2730</b>, ~14 SE — the one
+    large, unambiguous win, and it is the benchmark with real multi-turn chat structure);
+    ChatRAG-Hi in raw mode (+0.021, ~4 SE); Cocoteros-es from 0.00 to 1.44 BLEU.
+    <b>Cost:</b> OpenBookQA-es (&minus;0.096, ~5 SE), CALAME-PT (&minus;0.029, ~2.7 SE),
+    and — most sharply — translation, where Phrases loses 2.8 and 4.0 BLEU in the two
+    directions. <b>Noise:</b> Belebele, COPA, XStoryCloze, Portugal Basic QA (n=50), MMLU
+    in all three languages, and every math benchmark.
+  </div>
+
+  <div class="meta">
+    <b>Three cells that are not what they look like.</b>
+    <b>(1) EsCoLA reads 0.3200 &rarr; 0.7094 and means nothing.</b> Matthews correlation is
+    0.068 for SFT and &minus;0.018 in chat mode, i.e. no correlation with the labels at all:
+    both checkpoints emit a near-constant class and EsCoLA is ~2/3 one label, so the
+    accuracy column is class imbalance. It is struck through above.
+    <b>(2) CALAME-PT and Phrases have no chat column</b> — not because they were skipped,
+    but because the format is invalid for them: CALAME-PT is last-word completion and
+    Phrases is an ICL translation pattern, and asked in chat form the model returns an
+    empty turn (99.9% of CALAME-PT generations were empty, scoring 0.0005). That is a
+    measurement artifact, so it is not reported as a regression.
+    <b>(3) ALBA is still unscored</b> (no <code>ANTHROPIC_API_KEY</code>): 800 generations
+    were produced and saved with no judge_score. It is the one open-ended
+    instruction-following benchmark here, which makes it the measurement most relevant to
+    an SFT model, and it is the one still missing.
+  </div>
+
+  <div class="meta">
+    <b>Which benchmarks get a chat column.</b> The chat template is applied only where the
+    prompt is already a question or an instruction and the target is a free response:
+    ALBA, PT-Culture, ChatRAG-Hi, GSM8K-pt/hi, MATH-en, MGSM-es, MMLU-pt/es/hi, Portugal
+    Basic QA, Belebele-es and EsCoLA. It is withheld from continuation-shaped tasks —
+    CALAME-PT (bare fragment, predict the last word), COPA-es (<code>premise + "porque"</code>),
+    XStoryCloze-es (story continuation), OpenBookQA-es (a bare question stem) and Phrases
+    (<code>"Oració en espanyol: X"</code> &rarr; translation). The split was decided from each
+    task's prompt template, and the evidence agrees: every benchmark that collapsed to
+    zero under the chat template is on the withheld list.
+    <b>One unexplained case:</b> Cocoteros-es <i>is</i> instruction-shaped
+    (<code>"Genera una frase corta con estas palabras…"</code>) yet scores 1.44 BLEU raw and
+    0.00 in chat. Its chat number is withheld pending an explanation — the lm-evaluation-harness
+    adapter does not log per-example predictions, so <code>--log-samples</code> cannot show why.
   </div>
 
   <h2 class="section-title">What it looks like</h2>
@@ -665,11 +623,10 @@ buildDiffTable();
 buildNewBenchTable();
 </script>
 <script>
-const SFT = {"curve": [{"iter": 0, "train": 2.7653865814208984, "val": 2.7226619720458984, "tokens": 0}, {"iter": 397, "train": 1.897585153579712, "val": 1.9188919067382812, "tokens": 3536849}, {"iter": 794, "train": 1.8416416645050049, "val": 1.8602527379989624, "tokens": 7244331}, {"iter": 1191, "train": 1.816372275352478, "val": 1.835460901260376, "tokens": 10901105}, {"iter": 1588, "train": 1.793804407119751, "val": 1.8106584548950195, "tokens": 14498721}, {"iter": 1985, "train": 1.7791860103607178, "val": 1.7980352640151978, "tokens": 18254326}, {"iter": 2382, "train": 1.7692056894302368, "val": 1.7857182025909424, "tokens": 21804253}, {"iter": 2779, "train": 1.7665941715240479, "val": 1.784811019897461, "tokens": 25328736}, {"iter": 3176, "train": 1.7524598836898804, "val": 1.778447151184082, "tokens": 28852519}, {"iter": 3573, "train": 1.7370564937591553, "val": 1.7648699283599854, "tokens": 32527760}, {"iter": 3970, "train": 1.7301145792007446, "val": 1.7560503482818604, "tokens": 36041659}, {"iter": 4367, "train": 1.7281643152236938, "val": 1.7546144723892212, "tokens": 39582151}, {"iter": 4764, "train": 1.7161407470703125, "val": 1.7465684413909912, "tokens": 43157637}, {"iter": 5161, "train": 1.7081817388534546, "val": 1.7331031560897827, "tokens": 46825252}, {"iter": 5558, "train": 1.7100521326065063, "val": 1.729288101196289, "tokens": 50549417}, {"iter": 5955, "train": 1.6965644359588623, "val": 1.7216078042984009, "tokens": 54257994}, {"iter": 6352, "train": 1.6884534358978271, "val": 1.7113382816314697, "tokens": 57946677}, {"iter": 6749, "train": 1.6799900531768799, "val": 1.7054517269134521, "tokens": 61713014}, {"iter": 7146, "train": 1.6786315441131592, "val": 1.6992404460906982, "tokens": 65222731}, {"iter": 7543, "train": 1.6736555099487305, "val": 1.6951408386230469, "tokens": 68900322}, {"iter": 7940, "train": 1.6645128726959229, "val": 1.6856797933578491, "tokens": 72600184}, {"iter": 8337, "train": 1.6570278406143188, "val": 1.684827208518982, "tokens": 76120809}, {"iter": 8734, "train": 1.6492801904678345, "val": 1.6752355098724365, "tokens": 79851809}, {"iter": 9131, "train": 1.6449702978134155, "val": 1.6723310947418213, "tokens": 83293779}, {"iter": 9528, "train": 1.6421034336090088, "val": 1.669877052307129, "tokens": 86959985}, {"iter": 9925, "train": 1.634425401687622, "val": 1.6603403091430664, "tokens": 90682271}, {"iter": 10322, "train": 1.6230735778808594, "val": 1.6607471704483032, "tokens": 94329125}, {"iter": 10719, "train": 1.6089723110198975, "val": 1.6603963375091553, "tokens": 97926083}, {"iter": 11116, "train": 1.5884371995925903, "val": 1.6534696817398071, "tokens": 101565856}, {"iter": 11513, "train": 1.5862622261047363, "val": 1.652862310409546, "tokens": 105045414}, {"iter": 11910, "train": 1.5709593296051025, "val": 1.6481679677963257, "tokens": 108718718}, {"iter": 12307, "train": 1.5657823085784912, "val": 1.6453765630722046, "tokens": 112391687}, {"iter": 12704, "train": 1.5507628917694092, "val": 1.6402101516723633, "tokens": 116110334}, {"iter": 13101, "train": 1.5416312217712402, "val": 1.6410233974456787, "tokens": 119777246}, {"iter": 13498, "train": 1.533219337463379, "val": 1.632248878479004, "tokens": 123501252}, {"iter": 13895, "train": 1.524699330329895, "val": 1.6302452087402344, "tokens": 127075679}, {"iter": 14292, "train": 1.521310567855835, "val": 1.6293967962265015, "tokens": 130669453}, {"iter": 14689, "train": 1.5151252746582031, "val": 1.6271922588348389, "tokens": 134293846}, {"iter": 15086, "train": 1.5037344694137573, "val": 1.6220133304595947, "tokens": 138001152}, {"iter": 15483, "train": 1.5022761821746826, "val": 1.620894193649292, "tokens": 141603961}, {"iter": 15880, "train": 1.5003255605697632, "val": 1.6197906732559204, "tokens": 145159685}, {"iter": 16277, "train": 1.4912021160125732, "val": 1.6167253255844116, "tokens": 148883672}, {"iter": 16674, "train": 1.4829537868499756, "val": 1.6167738437652588, "tokens": 152398268}, {"iter": 17071, "train": 1.476628303527832, "val": 1.6144393682479858, "tokens": 156054311}, {"iter": 17468, "train": 1.472604751586914, "val": 1.6119276285171509, "tokens": 159601383}, {"iter": 17865, "train": 1.470948576927185, "val": 1.6111301183700562, "tokens": 163117012}, {"iter": 18262, "train": 1.4669607877731323, "val": 1.6101270914077759, "tokens": 166725119}, {"iter": 18659, "train": 1.4647166728973389, "val": 1.6098934412002563, "tokens": 170184182}, {"iter": 19056, "train": 1.4623024463653564, "val": 1.6085188388824463, "tokens": 173936229}, {"iter": 19453, "train": 1.4590487480163574, "val": 1.606951117515564, "tokens": 177716207}, {"iter": 19850, "train": 1.4586966037750244, "val": 1.6063032150268555, "tokens": 181376853}, {"iter": 19853, "train": 1.458524227142334, "val": 1.6062648296356201, "tokens": 181402434}], "evals": {"calame_pt": {"label": "CALAME-PT", "metric": "accuracy", "n": 500, "base_calame_pretrain": 0.408, "sft_calame_pretrain": 0.422}, "portugal_basic_qa": {"label": "Portugal Basic QA", "metric": "accuracy", "n": 50, "base_posttrain": 0.48, "base_pretrain": 0.56, "sft_posttrain": 0.42, "sft_pretrain": 0.52}, "pt_culture": {"label": "PT-Culture", "metric": "token_f1", "n": 500, "base_posttrain": 0.19321555668290333, "base_pretrain": 0.1765673508991872, "sft_posttrain": 0.2917930912696381, "sft_pretrain": 0.16900257261896418}, "chatrag_hi": {"label": "ChatRAG-Hi", "metric": "token_f1", "n": 500, "base_posttrain": 0.2615723087034655, "base_pretrain": 0.28525329668321686, "sft_posttrain": 0.23290821813856635, "sft_pretrain": 0.3043876420496374}, "belebele_spa_Latn": {"label": "Belebele-es", "metric": "acc", "n": 500, "base_posttrain": 0.24, "base_pretrain": 0.26, "sft_posttrain": 0.23, "sft_pretrain": 0.222}, "copa_es": {"label": "COPA-es", "metric": "acc", "n": 500, "base_posttrain": 0.526, "base_pretrain": 0.556, "sft_posttrain": 0.522, "sft_pretrain": 0.526}, "escola": {"label": "EsCoLA", "metric": "acc", "n": 500, "base_posttrain": 0.316, "mcc_base_posttrain": 0.0, "base_pretrain": 0.336, "mcc_base_pretrain": -0.055958243292127674, "sft_posttrain": 0.338, "mcc_sft_posttrain": 0.017764545804095113, "sft_pretrain": 0.686, "mcc_sft_pretrain": 0.06586189720207539}, "openbookqa_es": {"label": "OpenBookQA-es", "metric": "acc", "n": 500, "base_posttrain": 0.182, "base_pretrain": 0.2, "sft_posttrain": 0.172, "sft_pretrain": 0.19}, "xstorycloze_es": {"label": "XStoryCloze-es", "metric": "acc", "n": 500, "base_posttrain": 0.514, "base_pretrain": 0.532, "sft_posttrain": 0.514, "sft_pretrain": 0.516}}, "mix": [{"label": "aya_hi / headline", "lang": "hi", "tok": 21520374}, {"label": "aya_hi / news", "lang": "hi", "tok": 8731731}, {"label": "euroblocks_es", "lang": "es", "tok": 17827354}, {"label": "euroblocks_pt", "lang": "pt", "tok": 14075797}, {"label": "smoltalk2pt / tulu_personas", "lang": "pt", "tok": 11672740}, {"label": "smoltalk2pt / smol_rewrite", "lang": "pt", "tok": 10066374}, {"label": "smoltalk2pt / magpie_ultra", "lang": "pt", "tok": 4496627}, {"label": "indic_instruct_hi", "lang": "hi", "tok": 1846410}, {"label": "smoltalk2pt / everyday", "lang": "pt", "tok": 468138}]};
+const SFT = {"curve": [{"iter": 0, "train": 2.7653865814208984, "val": 2.7226619720458984, "tokens": 0}, {"iter": 397, "train": 1.897585153579712, "val": 1.9188919067382812, "tokens": 3536849}, {"iter": 794, "train": 1.8416416645050049, "val": 1.8602527379989624, "tokens": 7244331}, {"iter": 1191, "train": 1.816372275352478, "val": 1.835460901260376, "tokens": 10901105}, {"iter": 1588, "train": 1.793804407119751, "val": 1.8106584548950195, "tokens": 14498721}, {"iter": 1985, "train": 1.7791860103607178, "val": 1.7980352640151978, "tokens": 18254326}, {"iter": 2382, "train": 1.7692056894302368, "val": 1.7857182025909424, "tokens": 21804253}, {"iter": 2779, "train": 1.7665941715240479, "val": 1.784811019897461, "tokens": 25328736}, {"iter": 3176, "train": 1.7524598836898804, "val": 1.778447151184082, "tokens": 28852519}, {"iter": 3573, "train": 1.7370564937591553, "val": 1.7648699283599854, "tokens": 32527760}, {"iter": 3970, "train": 1.7301145792007446, "val": 1.7560503482818604, "tokens": 36041659}, {"iter": 4367, "train": 1.7281643152236938, "val": 1.7546144723892212, "tokens": 39582151}, {"iter": 4764, "train": 1.7161407470703125, "val": 1.7465684413909912, "tokens": 43157637}, {"iter": 5161, "train": 1.7081817388534546, "val": 1.7331031560897827, "tokens": 46825252}, {"iter": 5558, "train": 1.7100521326065063, "val": 1.729288101196289, "tokens": 50549417}, {"iter": 5955, "train": 1.6965644359588623, "val": 1.7216078042984009, "tokens": 54257994}, {"iter": 6352, "train": 1.6884534358978271, "val": 1.7113382816314697, "tokens": 57946677}, {"iter": 6749, "train": 1.6799900531768799, "val": 1.7054517269134521, "tokens": 61713014}, {"iter": 7146, "train": 1.6786315441131592, "val": 1.6992404460906982, "tokens": 65222731}, {"iter": 7543, "train": 1.6736555099487305, "val": 1.6951408386230469, "tokens": 68900322}, {"iter": 7940, "train": 1.6645128726959229, "val": 1.6856797933578491, "tokens": 72600184}, {"iter": 8337, "train": 1.6570278406143188, "val": 1.684827208518982, "tokens": 76120809}, {"iter": 8734, "train": 1.6492801904678345, "val": 1.6752355098724365, "tokens": 79851809}, {"iter": 9131, "train": 1.6449702978134155, "val": 1.6723310947418213, "tokens": 83293779}, {"iter": 9528, "train": 1.6421034336090088, "val": 1.669877052307129, "tokens": 86959985}, {"iter": 9925, "train": 1.634425401687622, "val": 1.6603403091430664, "tokens": 90682271}, {"iter": 10322, "train": 1.6230735778808594, "val": 1.6607471704483032, "tokens": 94329125}, {"iter": 10719, "train": 1.6089723110198975, "val": 1.6603963375091553, "tokens": 97926083}, {"iter": 11116, "train": 1.5884371995925903, "val": 1.6534696817398071, "tokens": 101565856}, {"iter": 11513, "train": 1.5862622261047363, "val": 1.652862310409546, "tokens": 105045414}, {"iter": 11910, "train": 1.5709593296051025, "val": 1.6481679677963257, "tokens": 108718718}, {"iter": 12307, "train": 1.5657823085784912, "val": 1.6453765630722046, "tokens": 112391687}, {"iter": 12704, "train": 1.5507628917694092, "val": 1.6402101516723633, "tokens": 116110334}, {"iter": 13101, "train": 1.5416312217712402, "val": 1.6410233974456787, "tokens": 119777246}, {"iter": 13498, "train": 1.533219337463379, "val": 1.632248878479004, "tokens": 123501252}, {"iter": 13895, "train": 1.524699330329895, "val": 1.6302452087402344, "tokens": 127075679}, {"iter": 14292, "train": 1.521310567855835, "val": 1.6293967962265015, "tokens": 130669453}, {"iter": 14689, "train": 1.5151252746582031, "val": 1.6271922588348389, "tokens": 134293846}, {"iter": 15086, "train": 1.5037344694137573, "val": 1.6220133304595947, "tokens": 138001152}, {"iter": 15483, "train": 1.5022761821746826, "val": 1.620894193649292, "tokens": 141603961}, {"iter": 15880, "train": 1.5003255605697632, "val": 1.6197906732559204, "tokens": 145159685}, {"iter": 16277, "train": 1.4912021160125732, "val": 1.6167253255844116, "tokens": 148883672}, {"iter": 16674, "train": 1.4829537868499756, "val": 1.6167738437652588, "tokens": 152398268}, {"iter": 17071, "train": 1.476628303527832, "val": 1.6144393682479858, "tokens": 156054311}, {"iter": 17468, "train": 1.472604751586914, "val": 1.6119276285171509, "tokens": 159601383}, {"iter": 17865, "train": 1.470948576927185, "val": 1.6111301183700562, "tokens": 163117012}, {"iter": 18262, "train": 1.4669607877731323, "val": 1.6101270914077759, "tokens": 166725119}, {"iter": 18659, "train": 1.4647166728973389, "val": 1.6098934412002563, "tokens": 170184182}, {"iter": 19056, "train": 1.4623024463653564, "val": 1.6085188388824463, "tokens": 173936229}, {"iter": 19453, "train": 1.4590487480163574, "val": 1.606951117515564, "tokens": 177716207}, {"iter": 19850, "train": 1.4586966037750244, "val": 1.6063032150268555, "tokens": 181376853}, {"iter": 19853, "train": 1.458524227142334, "val": 1.6062648296356201, "tokens": 181402434}], "mix": [{"label": "aya_hi / headline", "lang": "hi", "tok": 21520374}, {"label": "aya_hi / news", "lang": "hi", "tok": 8731731}, {"label": "euroblocks_es", "lang": "es", "tok": 17827354}, {"label": "euroblocks_pt", "lang": "pt", "tok": 14075797}, {"label": "smoltalk2pt / tulu_personas", "lang": "pt", "tok": 11672740}, {"label": "smoltalk2pt / smol_rewrite", "lang": "pt", "tok": 10066374}, {"label": "smoltalk2pt / magpie_ultra", "lang": "pt", "tok": 4496627}, {"label": "indic_instruct_hi", "lang": "hi", "tok": 1846410}, {"label": "smoltalk2pt / everyday", "lang": "pt", "tok": 468138}], "rows": [{"task": "alba", "label": "ALBA", "metric": "judged", "n": 800, "base": 0.0, "sft_raw": 0.0, "sft_chat": 0.0, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "belebele_spa_Latn", "label": "Belebele-es", "metric": "acc", "n": 900, "base": 0.22666666666666666, "sft_raw": 0.22, "sft_chat": 0.2288888888888889, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "calame_pt", "label": "CALAME-PT", "metric": "accuracy", "n": 2076, "base": 0.41763005780346824, "sft_raw": 0.3882466281310212, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "chatrag_hi", "label": "ChatRAG-Hi", "metric": "token_f1", "n": 3948, "base": 0.2793967729601602, "sft_raw": 0.30011076139609644, "sft_chat": 0.24042732680133358, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "cocoteros_es", "label": "Cocoteros-es", "metric": "bleu", "n": 969, "base": 3.4031745526093e-08, "sft_raw": 1.4368432924679462, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "copa_es", "label": "COPA-es", "metric": "acc", "n": 500, "base": 0.556, "sft_raw": 0.526, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "eqbench_es", "label": "EQ-Bench-es", "metric": "eqbench", "n": 168, "base": 0.0, "sft_raw": 0.0, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "escola", "label": "EsCoLA", "metric": "acc", "n": 1053, "base": 0.3200379867046534, "sft_raw": 0.7094017094017094, "sft_chat": 0.31054131054131057, "chat_ok": true, "mcc_raw": 0.06784477678548057, "mcc_chat": -0.017945656731050884}, {"task": "gsm8k_hi", "label": "GSM8K-hi", "metric": "exact_match", "n": 1319, "base": 0.009097801364670205, "sft_raw": 0.009855951478392721, "sft_chat": 0.01061410159211524, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "gsm8k_pt", "label": "GSM8K-pt", "metric": "exact_match", "n": 1295, "base": 0.009266409266409266, "sft_raw": 0.01698841698841699, "sft_chat": 0.0069498069498069494, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "math_en", "label": "MATH-en", "metric": "exact_match", "n": 500, "base": 0.0, "sft_raw": 0.0, "sft_chat": 0.0, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "mgsm_direct_es_spanish_bench", "label": "MGSM-es", "metric": "exact_match", "n": 250, "base": 0.012, "sft_raw": 0.012, "sft_chat": 0.02, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "mmlu_es", "label": "MMLU-es", "metric": "accuracy", "n": 14042, "base": 0.24647486113089304, "sft_raw": 0.24590514171770403, "sft_chat": 0.2464036462042444, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "mmlu_hi", "label": "MMLU-hi", "metric": "accuracy", "n": 14042, "base": 0.23878364905284147, "sft_raw": 0.23864121919954423, "sft_chat": 0.23778664007976072, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "mmlu_pt", "label": "MMLU-pt", "metric": "accuracy", "n": 14042, "base": 0.23465318330722118, "sft_raw": 0.24426719840478564, "sft_chat": 0.24732944025067655, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "openbookqa_es", "label": "OpenBookQA-es", "metric": "acc", "n": 500, "base": 0.286, "sft_raw": 0.19, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "phrases_es-va", "label": "Phrases es->va", "metric": "bleu", "n": 1958, "base": 3.647735770689148, "sft_raw": 0.8243035413020269, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "phrases_va-es", "label": "Phrases va->es", "metric": "bleu", "n": 1958, "base": 4.805761973734304, "sft_raw": 0.758069382204277, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}, {"task": "portugal_basic_qa", "label": "Portugal Basic QA", "metric": "accuracy", "n": 50, "base": 0.56, "sft_raw": 0.52, "sft_chat": 0.42, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "pt_culture", "label": "PT-Culture", "metric": "token_f1", "n": 2000, "base": 0.18840332655947167, "sft_raw": 0.19516784996995937, "sft_chat": 0.2729827673478093, "chat_ok": true, "mcc_raw": null, "mcc_chat": null}, {"task": "xstorycloze_es", "label": "XStoryCloze-es", "metric": "acc", "n": 1511, "base": 0.5228325612177366, "sft_raw": 0.5023163467902052, "sft_chat": null, "chat_ok": false, "mcc_raw": null, "mcc_chat": null}]};
 (function () {
   const svgns = "http://www.w3.org/2000/svg";
   const el = (n, a) => { const e = document.createElementNS(svgns, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
-  const fmt = v => (Math.abs(v) < 1 ? v.toFixed(4) : v.toFixed(2));
 
   // ---- headline numbers ---------------------------------------------------
   const badges = [
@@ -726,47 +683,43 @@ const SFT = {"curve": [{"iter": 0, "train": 2.7653865814208984, "val": 2.7226619
       "<p class=\"sft-note\">Orange = Hindi. 33.3% of every training token is <code>aya_hi</code>'s two templated tasks; the only general-purpose Hindi source is the 2.0% row.</p>";
   })();
 
-  // ---- per-benchmark comparison + full table ------------------------------
-  const ORDER = ["pt_culture", "chatrag_hi", "calame_pt", "portugal_basic_qa",
-                 "belebele_spa_Latn", "copa_es", "openbookqa_es", "xstorycloze_es", "escola"];
-  const GEN = new Set(["pt_culture", "chatrag_hi", "calame_pt"]);
-  const grid = document.getElementById("sftGrid");
-  const tbody = document.getElementById("sftTableBody");
+  // ---- full-dataset results table ----------------------------------------
+  (function () {
+    // Ordered by what the reader should look at first: the real gains, then
+    // the real regressions, then everything that turned out to be noise.
+    const ORDER = ["pt_culture", "chatrag_hi", "cocoteros_es", "alba",
+                   "calame_pt", "openbookqa_es", "phrases_es-va", "phrases_va-es",
+                   "xstorycloze_es", "copa_es", "belebele_spa_Latn", "portugal_basic_qa",
+                   "escola", "eqbench_es",
+                   "mmlu_pt", "mmlu_es", "mmlu_hi",
+                   "gsm8k_pt", "gsm8k_hi", "mgsm_direct_es_spanish_bench", "math_en"];
+    const DEGENERATE = new Set(["escola"]);          // MCC ~ 0, see note
+    const byTask = Object.fromEntries(SFT.rows.map(r => [r.task, r]));
+    const fmt = v => v === null || v === undefined ? "—" : (Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(4));
+    const tbody = document.getElementById("fullTableBody");
 
-  ORDER.forEach(key => {
-    const e = SFT.evals[key]; if (!e) return;
-    const baseRaw = e.base_pretrain !== undefined ? e.base_pretrain : e.base_calame_pretrain;
-    const sftRaw = e.sft_pretrain !== undefined ? e.sft_pretrain : e.sft_calame_pretrain;
-    const rows = [["base · raw", baseRaw, ""], ["SFT · raw", sftRaw, " s2"],
-                  ["base · chat", e.base_posttrain, ""], ["SFT · chat", e.sft_posttrain, " s2"]]
-                 .filter(r => r[1] !== undefined);
-    const max = Math.max.apply(null, rows.map(r => r[1]));
-
-    if (key !== "escola") {
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = "<h2>" + e.label + "</h2><p class=\"sub\">" + e.metric + " · n=" + e.n +
-        (GEN.has(key) ? " · generative" : " · multiple choice") + "</p>" +
-        rows.map(r => "<div class=\"sft-bar-row\"><span class=\"nm\">" + r[0] + "</span>" +
-          "<span class=\"sft-bar-track\"><span class=\"sft-bar-fill" + r[2] +
-          "\" style=\"width:" + (r[1] / max * 100).toFixed(1) + "%\"></span></span>" +
-          "<span class=\"val\">" + fmt(r[1]) + "</span></div>").join("");
-      grid.appendChild(card);
+    for (const key of ORDER) {
+      const r = byTask[key]; if (!r) continue;
+      const d = (r.sft_raw !== null && r.base !== null) ? r.sft_raw - r.base : null;
+      // Two standard errors, for a proportion metric at this n -- the bar a
+      // difference has to clear before it is called anything but noise.
+      const isProp = ["accuracy", "acc", "acc_norm", "exact_match"].includes(r.metric);
+      const se = isProp && r.base !== null ? Math.sqrt(Math.max(r.base * (1 - r.base), 0.01) / r.n) : null;
+      const real = d !== null && se !== null && Math.abs(d) > 2 * se;
+      const cls = d === null ? "muted" : (real ? (d > 0 ? "up" : "down") : "flat");
+      const strike = DEGENERATE.has(key) ? " style=\"text-decoration:line-through;opacity:0.55\"" : "";
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + r.label + (DEGENERATE.has(key) ? " <span style=\"color:var(--text-muted)\">(degenerate)</span>" : "") + "</td>" +
+        "<td class=\"muted\">" + r.metric + "</td>" +
+        "<td class=\"num muted\">" + r.n.toLocaleString() + "</td>" +
+        "<td class=\"num\"" + strike + ">" + fmt(r.base) + "</td>" +
+        "<td class=\"num\"" + strike + ">" + fmt(r.sft_raw) + "</td>" +
+        "<td class=\"num" + (r.chat_ok ? "" : " muted") + "\">" + fmt(r.sft_chat) + "</td>" +
+        "<td class=\"num " + cls + "\"" + strike + ">" + (d === null ? "—" : (d > 0 ? "+" : "") + fmt(d)) + "</td>";
+      tbody.appendChild(tr);
     }
-
-    const delta = (e.sft_posttrain !== undefined && e.base_posttrain !== undefined)
-      ? e.sft_posttrain - e.base_posttrain : null;
-    const cell = v => v === undefined ? "<td class=\"num muted\">—</td>" : "<td class=\"num\">" + fmt(v) + "</td>";
-    const tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + e.label +
-        (key === "escola" ? " <span style=\"color:var(--text-muted)\">(degenerate — see note)</span>" : "") + "</td>" +
-      "<td class=\"muted\">" + e.metric + "</td>" +
-      cell(baseRaw) + cell(sftRaw) + cell(e.base_posttrain) + cell(e.sft_posttrain) +
-      (delta === null ? "<td class=\"num muted\">—</td>"
-        : "<td class=\"num " + (delta > 0.02 ? "up" : (delta < -0.02 ? "down" : "flat")) + "\">" +
-          (delta > 0 ? "+" : "") + fmt(delta) + "</td>");
-    tbody.appendChild(tr);
-  });
+  })();
 })();
 
 </script>
